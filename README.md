@@ -1,11 +1,7 @@
 # dsh-vibe-coding-prd
-<<<<<<< HEAD
-把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。
-=======
 
 **把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。**
 
-[![自测](https://github.com/OWNER/dsh-vibe-coding-prd/actions/workflows/test.yml/badge.svg)](https://github.com/OWNER/dsh-vibe-coding-prd/actions/workflows/test.yml)
 ![许可](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.1.0-1f6feb.svg)
 
@@ -90,17 +86,12 @@ plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-codi
 dsh plugin --profile desktop add github:<你的用户名>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
 ```
 
-`#path:` 后缀指向仓库里的子目录（pnpm 的子目录依赖语法）。
 
 ### 方式三：从 npm 安装
 
 ```powershell
 dsh plugin --profile desktop add dsh-vibe-coding-prd
 ```
-
-> 发布前请先确认包名未被占用：<https://www.npmjs.com/package/dsh-vibe-coding-prd>。
-> 若已被占用，改 `packages/dsh-vibe-coding-prd/package.json` 的 `name`，
-> 同时同步 `cordis.patch.yml` 里的 `name` 字段和本文档。
 
 ### 装完怎么确认生效
 
@@ -221,4 +212,4 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 19 项
 ## 许可
 
 [MIT](LICENSE)
->>>>>>> 5726782 (首个版本：把访谈式 PRD skill 做成 DSH 插件)
+
