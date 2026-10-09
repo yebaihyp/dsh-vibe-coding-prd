@@ -1,2 +1,224 @@
 # dsh-vibe-coding-prd
+<<<<<<< HEAD
 把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。
+=======
+
+**把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。**
+
+[![自测](https://github.com/OWNER/dsh-vibe-coding-prd/actions/workflows/test.yml/badge.svg)](https://github.com/OWNER/dsh-vibe-coding-prd/actions/workflows/test.yml)
+![许可](https://img.shields.io/badge/license-MIT-blue.svg)
+![dsh](https://img.shields.io/badge/dsh-%3E%3D0.1.0-1f6feb.svg)
+
+---
+
+## 它解决什么问题
+
+用 AI 写东西的人，真正的瓶颈很少是"AI 不会写代码"，而是**需求说不清**：
+
+- 对着空白 PRD 模板，写不出第一行；
+- 被问"你想要什么"就卡住，只能说"就那种…你懂的"；
+- AI 一听需求就冲去写代码，方向跑偏，返工三遍；
+- 聊了两个小时，最后什么都没落下来。
+
+这个项目把流程反过来了：**让 AI 来问，你只负责回答**。一次只问一件事，在你判断不了的地方给选项和推荐，
+问完把成果落盘成 `docs/prd.md` 和 `docs/项目说明书.md` —— 一份能直接拿去开工的文档。
+
+它由七个工具 + 一份访谈行为规范组成：工具管状态和门禁，规范管"怎么问才像产品顾问"。
+**该强制的地方写进代码，而不是写在提示词里靠模型自觉。**
+
+---
+
+## 为什么要做成插件（而不是一段提示词）
+
+一段"访谈剧本"提示词也能用，但四个地方一定会失控，插件把它们变成硬约束：
+
+| 容易失控的地方 | 提示词方案 | 本插件 |
+|----------------|-----------|--------|
+| 步骤顺序与门禁 | 靠模型自觉遵守 | 引擎强制：退出条件不满足就停在本步，返回缺口清单 |
+| 跨会话续接 | 靠模型每次重读文档 | 账本 + 状态文件，`interview_start` 一次调用恢复 |
+| 跳步 | 靠模型记得留痕 | 必经步骤直接拒绝跳过，可选步骤理由自动写进账本 |
+| 验收标准质量 | 靠模型自律 | 空话黑名单 + 可观察性检查，不合格过不了门 |
+| 出口门自检 | 靠模型自查清单 | 11 条机器校验，**有一条没过就不写任何文件** |
+| 产物结构 | 模型自己组织文档 | 按固定结构渲染，无占位符残留 |
+
+---
+
+## 仓库结构
+
+```
+.
+├── packages/
+│   └── dsh-vibe-coding-prd/     # ★ 插件本体（可单独发布到 npm / 插件市场）
+│       ├── index.js             # Host 半边：七个访谈工具 + 技能注册
+│       ├── engine.js            # 纯逻辑：节点定义、校验门、账本、文档渲染
+│       ├── skills/
+│       │   └── vibe-coding-interview.md   # 注册给宿主的访谈行为规范
+│       ├── test/                # 引擎层 + 工具层自测（零依赖，裸 Node 可跑）
+│       ├── cordis.patch.yml     # 补丁层：把插件行插入 profile 组合
+│       ├── icon.svg             # 插件卡片图标
+│       └── README.md            # 插件自己的说明（英文版，中文版 README.zh.md）
+├── docs/                        # 真实产物示例：访谈跑完落盘的三份文件
+│   ├── prd.md                   # 产品需求文档
+│   ├── 项目说明书.md             # 贯穿项目的"活文档"
+│   └── 进度账本.md               # 十步走到哪、跳步留痕（插件自动维护）
+├── .github/workflows/test.yml   # CI：push / PR 自动跑自测
+├── CONTRIBUTING.md              # 贡献与维护说明（含发布检查清单）
+├── CHANGELOG.md
+└── LICENSE                      # MIT
+```
+
+`docs/` 是跑完十步后的真实产物，可以直接对照产出长什么样。
+
+---
+
+## 安装
+
+### 方式一：本机路径安装
+
+在 Harness 会话里让 agent 执行，`target` 填插件的**绝对路径**：
+
+```
+plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-coding-prd
+```
+
+成功后 profile 的 `package.json` 会多出该依赖，补丁层插入 `vibe-coding-prd` 一行。
+**装完需要重启 Harness 宿主**——DSH 把模块代次缓存在进程里，热切换不会加载新的 `index.js`。
+
+### 方式二：从 GitHub 安装
+
+```powershell
+dsh plugin --profile desktop add github:<你的用户名>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
+```
+
+`#path:` 后缀指向仓库里的子目录（pnpm 的子目录依赖语法）。
+
+### 方式三：从 npm 安装
+
+```powershell
+dsh plugin --profile desktop add dsh-vibe-coding-prd
+```
+
+> 发布前请先确认包名未被占用：<https://www.npmjs.com/package/dsh-vibe-coding-prd>。
+> 若已被占用，改 `packages/dsh-vibe-coding-prd/package.json` 的 `name`，
+> 同时同步 `cordis.patch.yml` 里的 `name` 字段和本文档。
+
+### 装完怎么确认生效
+
+在会话里问一句"我们走到哪了"，如果 agent 能调用 `interview_status`，说明七个工具已经注册。
+也可以让 agent 跑 `cordis_inspect_query`（`Tool.listTools`）核对工具名。
+
+
+---
+
+## 跑一遍看看
+
+对 agent 说：
+
+> 我想做个 XX，但不知道怎么跟 AI 说
+
+然后它会走完这套流程（工具名 → 实际动作）：
+
+```
+interview_start      读账本（或新建）→ "我们现在在 S1.0，第一个问题……"
+interview_next       取当前这一问的提问稿：问什么、给用户哪些选项、退出条件是什么
+（模型把问题发给你 —— 选项会渲染成可点按钮）
+interview_advance    记答案并过门；缺东西就返回缺口清单，流程停在本步
+… 重复 10 步 …
+interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明书.md
+```
+
+**你会拿到什么**（工作目录下）：
+
+| 文件 | 内容 |
+|------|------|
+| `docs/prd.md` | 产品结论、目标用户、★形态与资源约束、信息架构、边界情况、验收标准、MVP 定义、以后再说 |
+| `docs/项目说明书.md` | 一句话、四要素需求基准描述、选定技术栈、验收清单、决策复盘案例库入口 |
+| `docs/进度账本.md` | 十步走到哪、跳步留痕、阻塞项（插件自动维护，不用手改） |
+| `docs/开发文档.md` | 可选：传 `includeDevDoc: true` 时产出 |
+
+顺带一提：本仓库的 [`docs/`](docs/) 里就有一份真实产物——"机器学习讲解网站"的 PRD，
+走完全部十步、出口门通过后落盘的。可以直接拿来对照产出长什么样。
+
+---
+
+## 七个工具
+
+| 工具 | 作用 | 关键返回 |
+|------|------|---------|
+| `interview_start` | 开场 / 续接：读账本恢复进度，不存在就初始化到 S1.0 | `resumed`、`step`、`mode`、`missingRequired` |
+| `interview_next` | 取当前这一问：提问稿、给用户的选项、退出条件、已收字段 | `ask`、`fields`、`options`、`exitCondition`、`lightGroup` |
+| `interview_advance` | 记答案并判断退出条件；部分答案也可提交 | `advanced`、`gaps`、`warnings`、`next` |
+| `interview_skip` | 跳过可选步骤并留痕；必经步骤一律拒绝 | `skipped`、`reason` |
+| `interview_finalize` | 出口门自检 + 落盘两份（或三份）文档 | `written`、`checks`、`blocking`、`files` |
+| `interview_status` | 只读查看进度、跳步留痕、阻塞项 | 全量步骤状态 |
+| `interview_ask` | 直接把当前这一问弹给你并等回答（选项渲染成按钮） | `answer` |
+
+七个工具的 `parameters` 都是标准 JSON Schema，返回值都是 JSON，`output.render` 给出一行中文摘要。
+
+---
+
+## 十步门禁
+
+| 步骤 | 必经? | 退出条件 |
+|------|-------|---------|
+| S1.0 破冰 | ✅ | 一句话描述 + 谁用 |
+| S1.1 分诊定深度 | ✅ | 判定轻 / 重并写入账本 |
+| S1.2 资源现实盘点 | ✅ | 现有资源清单已回填 |
+| S1.3 ★ 定形态：它活在哪 | ✅ | 四个形态里选定一项 |
+| S1.4 补全需求 | ✅ | 数据旅程扫过，每个缺口都有"怎么办" |
+| S1.5 信息架构 | 可选 | UI 类产品才需要，否则跳步留痕 |
+| S1.6 边界与禁区 | ✅ | 明确不做 ≥ 1 条 + 合规红线已问 |
+| S1.7 验收 + MVP | ✅ | ≥ 1 条可验证验收（EARS 优先）+ MVP 线已定 |
+| S1.8 技术栈雏形 | 可选 | 同时写明"选定"与"否决" |
+| S1.9 落盘 | ✅ | 两份文档已写 |
+
+三条硬规矩：
+
+1. **一步没过，不进下一步。** `interview_advance` 返回 `advanced: false` 时，模型必须补问缺口。
+2. **必经步骤不能跳。** `interview_skip` 会拒绝，并告诉你必须问出什么。
+3. **出口门不分轻重模式。** 轻模式省的是停顿次数，不是产出质量。
+
+---
+
+## 出口门
+
+`interview_finalize` 逐条机器校验，**只要有一条 error 未过就一个文件都不写**：
+
+- [ ] 必经步骤全部 ✅、跳过的可选步骤有留痕
+- [ ] PRD 元信息（文档状态 / 版本 / 产品名称）已填，版本形如 `v0.1`
+- [ ] 核心定位是一句完整的话（≥ 10 字）
+- [ ] 明确不做 ≥ 1 条
+- [ ] 「它活在哪」已选定
+- [ ] 验收标准 ≥ 1 条且具体可验证（"系统正常""体验良好"这类空话直接拒绝）
+- [ ] MVP 完成定义 ≥ 1 条
+- [ ] 需求基准描述覆盖场景 / 目标 / 约束 / 验收
+- [ ] 无 `{占位符}` / TODO / TBD / `___` 残留
+- [ ] 无英文正文（术语、代码、URL 除外）
+- [ ] 无密钥、密码、token 等敏感信息
+
+全过之后才落盘，并给出这句声明：
+
+> ✅ S1 出口门通过：prd.md / 项目说明书已写、账本 S1 已标完成、无占位符、格式合规。
+
+---
+
+## 自测
+
+插件本体**零依赖**，不需要 `npm install`，裸 Node 直接跑：
+
+```bash
+node packages/dsh-vibe-coding-prd/test/engine.test.mjs   # 引擎层 22 项
+node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 19 项
+```
+
+工具层测试用一个假 ctx 收集注册的工具，然后照真实调用顺序把整场访谈点一遍，
+覆盖三条只有真跑才看得见的约束：**退出条件不满足必须停在本步**、**必填步骤不能跳**、
+**出口门没过不许写文件**。
+
+
+---
+
+## 许可
+
+[MIT](LICENSE)
+>>>>>>> 5726782 (首个版本：把访谈式 PRD skill 做成 DSH 插件)

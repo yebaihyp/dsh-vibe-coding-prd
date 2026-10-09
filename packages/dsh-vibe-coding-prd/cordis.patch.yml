@@ -1,0 +1,9 @@
+# dsh-vibe-coding-prd 的补丁层：把插件行插入当前 profile 的组合。
+#
+# name 必须与 package.json 的 name 一致——宿主按这个名字解析插件包，
+# 所以从 npm 装、从 GitHub 子目录装、从本机路径装都走同一条记录。
+# 本插件没有 Config 字段，config 留空对象即可；要改运行参数就在这里加。
+- insert:
+    - id: vibe-coding-prd
+      name: dsh-vibe-coding-prd
+      config: {}

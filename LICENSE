@@ -1,6 +1,10 @@
 MIT License
 
+<<<<<<< HEAD
 Copyright (c) 2026 yebaihyp
+=======
+Copyright (c) 2026 dsh-vibe-coding-prd contributors
+>>>>>>> 5726782 (首个版本：把访谈式 PRD skill 做成 DSH 插件)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

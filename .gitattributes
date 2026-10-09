@@ -1,0 +1,18 @@
+# 行尾与编码：本套件所有文本文件统一 UTF-8 + LF（见 AGENTS.md 第二节）
+* text=auto eol=lf
+
+*.md   text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+*.svg  text eol=lf
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+
+# 打包产物按二进制处理，避免 diff 噪音
+*.tgz binary

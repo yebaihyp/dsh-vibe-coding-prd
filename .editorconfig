@@ -1,0 +1,24 @@
+# 见 AGENTS.md 第二节：正文与注释用简体中文，文件编码 UTF-8、行尾 LF。
+# 编辑器按这份配置工作，避免在中文 Windows 上被写成 GBK 或 CRLF。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾两个空格是有意义的换行，不要自动删
+trim_trailing_whitespace = false
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
+
+[*.svg]
+indent_size = 2

@@ -1,0 +1,26 @@
+name: 自测
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: 引擎层 + 工具层自测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 插件本体零依赖，不需要 npm install，直接跑
+      - name: 引擎自测（门控、校验门、账本往返、出口门、文档结构）
+        working-directory: packages/dsh-vibe-coding-prd
+        run: node test/engine.test.mjs
+
+      - name: 工具层集成自测（注册表契约、完整访谈流程、状态续接）
+        working-directory: packages/dsh-vibe-coding-prd
+        run: node test/tools.test.mjs

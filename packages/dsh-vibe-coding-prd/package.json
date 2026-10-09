@@ -1,0 +1,45 @@
+{
+  "name": "dsh-vibe-coding-prd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "访谈式需求 Agent：一次只问一件事，把一个说不清需求的人带到一份 AI 能直接照着开工的 PRD。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "prd",
+    "requirements",
+    "interview",
+    "product-manager"
+  ],
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./engine": "./engine.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "engine.js",
+    "cordis.patch.yml",
+    "skills/",
+    "test/",
+    "icon.svg",
+    "README.md",
+    "README.zh.md"
+  ],
+  "engines": {
+    "dsh": ">=0.1.0"
+  },
+  "scripts": {
+    "test": "node test/engine.test.mjs && node test/tools.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

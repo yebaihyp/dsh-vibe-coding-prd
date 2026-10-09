@@ -1,0 +1,23 @@
+# 访谈产物：本仓库自己的需求对齐记录
+# 这两个文件由 dsh-vibe-coding-prd 在运行时生成，属于本地状态，不进版本库。
+docs/.vibe-coding-prd-state.json
+
+# 依赖与包管理器
+node_modules/
+.pnpm-store/
+
+# 临时与探测目录（ASAR 解包工具、会话导出等）
+.tmp/
+*.log
+
+# 操作系统与编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# 打包产物
+*.tgz
+dist/
