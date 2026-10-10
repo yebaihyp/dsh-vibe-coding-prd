@@ -1,11 +1,5 @@
 # 贡献与维护说明
 
-> 这份文件写给一年后回来改代码的人，也包括你自己。
-
-## 维护成本优先
-
-本项目的最高原则是**复杂度是负债，不是资产**。提 PR 前先问一句：这个改动一年后还修得动吗？
-
 具体到本仓库：
 
 - **不引入运行时依赖。** 插件本体零依赖是刻意的设计（原因见下方"为什么零依赖"），
@@ -43,27 +37,6 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
 # 3. 改了代码要重启宿主才生效
 #    DSH 的模块代次缓存在进程里，热切换不会加载新的 index.js
 ```
-
-## 插件"突然消失"时怎么查
-
-开发期最烦的一种现象：昨天工具还在，今天工具目录里一个都没有。**九成是插件被停用了，不是代码坏了。**
-按这个顺序查，不要一上来就改代码：
-
-1. **看补丁层有没有停用行**：`$env:DSH_PROFILE_DIR\cordis.patch.yml` 里若出现
-   `- id: vibe-coding-prd` + `disabled: true`，插件就是被停用的。任何对 profile
-   做改写的操作都可能留下这类行——它们是持久化的，重启也不会自己消失。
-2. **看 bundles 列表**：profile `package.json` 的 `dsh.profile.bundles` 里少了
-   `dsh-vibe-coding-prd`，同样说明它没被挂载。
-3. **重新启用**：`plugin_manager action=set_bundle target=dsh-vibe-coding-prd enabled=true`。
-   若补丁层里的停用行还在，删掉它（**先备份该文件**，只删指向本插件的那两行）。
-4. **确认代码本身没坏**：在 profile 目录下直接跑一次导入，能拿到 7 个工具名就说明插件是好的：
-
-```powershell
-node -e "import('dsh-vibe-coding-prd').then(m=>{const t=[];m.apply({tools:{register(d){t.push(d.name);return()=>{}}},userQuestions:{},skills:{register(){return()=>{}}}});console.log(t.length, t.join(', '))})"
-```
-
-排查时注意一点：`application: applied` 只表示组合应用成功，**不代表进行中的会话能立刻用上新工具**。
-当前会话的工具清单在开场时就固定了，中途启用的工具要等下一次会话才出现在工具目录里。
 
 ## 测试怎么写
 
