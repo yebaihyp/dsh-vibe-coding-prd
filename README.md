@@ -39,34 +39,6 @@
 
 ---
 
-## 仓库结构
-
-```
-.
-├── packages/
-│   └── dsh-vibe-coding-prd/     # ★ 插件本体（可单独发布到 npm / 插件市场）
-│       ├── index.js             # Host 半边：七个访谈工具 + 技能注册
-│       ├── engine.js            # 纯逻辑：节点定义、校验门、账本、文档渲染
-│       ├── skills/
-│       │   └── vibe-coding-interview.md   # 注册给宿主的访谈行为规范
-│       ├── test/                # 引擎层 + 工具层自测（零依赖，裸 Node 可跑）
-│       ├── cordis.patch.yml     # 补丁层：把插件行插入 profile 组合
-│       ├── icon.svg             # 插件卡片图标
-│       └── README.md            # 插件自己的说明（英文版，中文版 README.zh.md）
-├── docs/                        # 真实产物示例：访谈跑完落盘的三份文件
-│   ├── prd.md                   # 产品需求文档
-│   ├── 项目说明书.md             # 贯穿项目的"活文档"
-│   └── 进度账本.md               # 十步走到哪、跳步留痕（插件自动维护）
-├── .github/workflows/test.yml   # CI：push / PR 自动跑自测
-├── CONTRIBUTING.md              # 贡献与维护说明（含发布检查清单）
-├── CHANGELOG.md
-└── LICENSE                      # MIT
-```
-
-`docs/` 是跑完十步后的真实产物，可以直接对照产出长什么样。
-
----
-
 ## 安装
 
 ### 方式一：本机路径安装
@@ -74,7 +46,7 @@
 在 Harness 会话里让 agent 执行，`target` 填插件的**绝对路径**：
 
 ```
-plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-coding-prd
+plugin_manager  action=install_bundle  target=< >/packages/dsh-vibe-coding-prd
 ```
 
 成功后 profile 的 `package.json` 会多出该依赖，补丁层插入 `vibe-coding-prd` 一行。
@@ -83,7 +55,7 @@ plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-codi
 ### 方式二：从 GitHub 安装
 
 ```powershell
-dsh plugin --profile desktop add github:<你的用户名>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
+dsh plugin --profile desktop add github:<user>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
 ```
 
 
@@ -106,6 +78,10 @@ dsh plugin --profile desktop add dsh-vibe-coding-prd
 对 agent 说：
 
 > 我想做个 XX，但不知道怎么跟 AI 说
+
+>请帮我生成xx产品需求文档prd
+
+……
 
 然后它会走完这套流程（工具名 → 实际动作）：
 
