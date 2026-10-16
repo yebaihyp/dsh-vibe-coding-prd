@@ -303,17 +303,20 @@ const EMPTY_PHRASES = [
   '若干', '等等等', '待定', '视情况'
 ];
 
-/** 占位符特征 */
-const PLACEHOLDER_PATTERNS = [
-  /\{[^}\n]{1,40}\}/,
-  /\{\{[^}\n]{1,40}\}\}/,
-  /\bTODO\b/i,
-  /\bTBD\b/i,
-  /_{3,}/,
-  /<[^>\n]{2,30}>/
-];
+/**
+ * 分步提交上限（v0.2，报告 2.8-B）。
+ *
+ * 背景：工具参数是流式拼出来的，参数越长、嵌套越深，越容易在拼装环节产出非法 JSON，
+ * harness 判定 MALFORMED_RESPONSE 后中止整轮。可复现的必要条件就是"参数足够长且结构复杂"，
+ * 所以给单次 interview_advance 定一个软上限：超限不拒收（答案照常落盘，绝不丢），
+ * 只提醒下一次拆开交。字段数与字符数的判定见 measureSubmission()。
+ */
+export const SUBMIT_LIMITS = { maxFields: 3, maxChars: 1200, maxItems: 3 };
 
-/** 段英文特征：连续 3 个及以上拉丁词，基本可判定为英文正文 */
+/** 中文与全角标点：行内出现它们就不算"英文正文" */
+const CJK = /[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/;
+
+/** 段英文特征：连续 3 个及以上拉丁词（是否真算"英文正文"还要过 scanEnglish 的行级判定） */
 const ENGLISH_RUN = /[A-Za-z][A-Za-z'’-]*(?:\s+[A-Za-z][A-Za-z'’-]*){2,}/;
 
 /** 明显是敏感信息的特征：密钥赋值、常见 key 前缀 */
@@ -325,8 +328,10 @@ const SECRET_PATTERNS = [
 /** 生成一份空状态 */
 export function createState(projectName) {
   return {
-    version: 1,
+    version: 2,
     projectName: projectName || '',
+    // 工作目录：账本与状态都记一份，加载时和本次解析出的目录比对（报告 P3）
+    workspace: '',
     stage: 'S1',
     stageName: '需求对齐',
     step: 'S1.0',
@@ -337,6 +342,8 @@ export function createState(projectName) {
     answers: {},
     skipped: [],
     blocks: [],
+    // 英文自检的白名单：项目名之外，用户坚持要用的品牌名 / 术语（报告 P6）
+    terms: [],
     notes: ''
   };
 }
@@ -401,6 +408,7 @@ export function renderLedger(state) {
 > 由 dsh-vibe-coding-prd 插件自动维护，不必手工编辑。
 
 - 项目名称：${state.projectName || '（待 S1.9 落盘时确定）'}
+- 工作目录：${state.workspace || '（未记录）'}
 - 当前阶段：S1 · 需求对齐
 - 当前步骤：${state.step}
 - 模式：${mode}
@@ -462,6 +470,9 @@ export function parseLedger(text) {
   };
   const name = pick('项目名称');
   if (name && !name.startsWith('（')) state.projectName = name;
+  // 账本里记的工作目录：加载时和本次解析出的目录比对，不一致就不续接（报告 P3）
+  const workspace = pick('工作目录');
+  if (workspace && !workspace.startsWith('（')) state.workspace = workspace;
   const step = pick('当前步骤');
   if (/^S1\.\d$/.test(step)) state.step = step;
   const modeRaw = pick('模式');
@@ -470,6 +481,10 @@ export function parseLedger(text) {
   const updated = pick('最近更新');
   if (updated && !updated.startsWith('（')) state.updatedAt = updated;
   if (/S1 需求对齐\s*\|\s*已完成/.test(text)) state.stage = 'S2';
+  // 备注列也要读回来，否则仅凭账本恢复（状态旁挂文件丢了）时这一格会被默认值盖掉
+  const stageRow = text.match(/^\|\s*S1 需求对齐\s*\|[^|]*\|[^|]*\|([^|]*)\|/m);
+  const notes = stageRow ? stageRow[1].trim() : '';
+  if (notes && notes !== '入口路径：访谈 Agent') state.notes = notes;
 
   const rows = text.matchAll(/^\|\s*(S1\.\d)\s+[^|]*\|\s*(必经|可选)\s*\|\s*([^|]*)\|([^|]*)\|/gm);
   for (const row of rows) {
@@ -493,6 +508,69 @@ export function parseLedger(text) {
   return state;
 }
 
+/**
+ * 数组元素的文本形式。
+ *
+ * 字段定义里 itemShape: ['item'] 表示元素是 {item:"…"} 对象，但模型经常直接给字符串。
+ * 两种形状都要能读——v0.2 修的就是报告 P5：渲染器把对象当字符串用，
+ * 文档里于是出现 `[object Object]` 与 `{"item":"…"}`（后者还会被占位符自检误杀）。
+ */
+export function itemText(item) {
+  if (item === undefined || item === null) return '';
+  if (typeof item === 'string') return item;
+  if (typeof item === 'number' || typeof item === 'boolean') return String(item);
+  if (typeof item === 'object') {
+    for (const key of ['item', 'text', 'title', 'content', 'value']) {
+      if (typeof item[key] === 'string' && item[key].trim()) return item[key];
+    }
+    const texts = Object.values(item).filter((value) => typeof value === 'string' && value.trim());
+    if (texts.length === 1) return texts[0];
+    return JSON.stringify(item);
+  }
+  return String(item);
+}
+
+/**
+ * 两段式条目（{entry, destination} / {gap, handling}）拆成两段文本。
+ * 模型偶尔把两段写成一行（"首页 → 结果页"），这里也认，避免文档里出现 undefined。
+ */
+export function pairText(item, keys) {
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    return keys.map((key) => itemText(item[key]));
+  }
+  const parts = itemText(item).split(/\s*(?:→|->|=>)\s*/);
+  return keys.map((key, index) => String(parts[index] ?? '').trim());
+}
+
+/**
+ * 把一步的答案归一化成引擎内部形状（写入状态之前做，所以状态文件、账本、文档看到的是同一种形状）：
+ * - itemShape: ['item']：元素统一成字符串（{item:"…"} → "…"）；
+ * - itemShape: [a, b]：字符串形式按 "→" 拆成 {a, b} 对象，其余保持原样；
+ * - 其它字段原样。
+ */
+export function normalizeValues(node, values) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return values;
+  const out = { ...values };
+  for (const field of node.fields) {
+    const value = out[field.key];
+    if (field.type !== 'array' || !Array.isArray(field.itemShape) || !Array.isArray(value)) continue;
+    if (field.itemShape.length === 1) {
+      out[field.key] = value.map(itemText).filter((text) => String(text).trim() !== '');
+      continue;
+    }
+    if (field.itemShape.length === 2) {
+      const keys = field.itemShape;
+      out[field.key] = value.map((item) => {
+        if (item && typeof item === 'object' && !Array.isArray(item)) return item;
+        const parts = itemText(item).split(/\s*(?:→|->|=>)\s*/).filter((part) => part.trim());
+        if (parts.length < 2) return item;
+        return { [keys[0]]: parts[0].trim(), [keys[1]]: parts.slice(1).join(' → ').trim() };
+      });
+    }
+  }
+  return out;
+}
+
 /** 校验单个字段的答案，返回问题列表 */
 function validateField(node, field, value) {
   const issues = [];
@@ -513,17 +591,24 @@ function validateField(node, field, value) {
       issues.push({ field: field.key, severity: 'error', message: `${node.id} ${label}：至少要 ${field.minItems} 条，现在是 ${value.length} 条` });
     }
     value.forEach((item, index) => {
-      const text = typeof item === 'string' ? item : JSON.stringify(item);
-      if (!text || text.length < 2) {
+      const text = itemText(item);
+      if (!text || text.trim().length < 2) {
         issues.push({ field: field.key, severity: 'error', message: `${node.id} ${label} 第 ${index + 1} 条太短，写不成一条需求` });
       }
-      if (field.itemShape?.length === 2 && typeof item === 'object') {
+      if (field.itemShape?.length === 2) {
         const [a, b] = field.itemShape;
-        if (!item[a] || String(item[a]).length < 2) {
-          issues.push({ field: field.key, severity: 'error', message: `${node.id} ${label} 第 ${index + 1} 条缺少「${a}」（${field.itemHint || ''}）` });
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          issues.push({
+            field: field.key,
+            severity: 'error',
+            message: `${node.id} ${label} 第 ${index + 1} 条要写成对象 {"${a}":"…","${b}":"…"}（${field.itemHint || ''}）`
+          });
+          return;
         }
-        if (!item[b] || String(item[b]).length < 2) {
-          issues.push({ field: field.key, severity: 'error', message: `${node.id} ${label} 第 ${index + 1} 条缺少「${b}」（${field.itemHint || ''}）` });
+        for (const key of [a, b]) {
+          if (!item[key] || String(item[key]).length < 2) {
+            issues.push({ field: field.key, severity: 'error', message: `${node.id} ${label} 第 ${index + 1} 条缺少「${key}」（${field.itemHint || ''}）` });
+          }
         }
       }
     });
@@ -562,21 +647,22 @@ function validateField(node, field, value) {
 /** 校验验收标准：必须是可二元判断的事实 */
 export function checkAcceptance(items) {
   const issues = [];
-  items.forEach((raw, index) => {
-    const text = String(raw).trim();
+  (Array.isArray(items) ? items : []).forEach((raw, index) => {
+    const text = itemText(raw).trim();
     const position = `验收标准 第 ${index + 1} 条`;
     const empty = EMPTY_PHRASES.find((phrase) => text.includes(phrase));
     if (empty) {
-      issues.push({ severity: 'error', message: `${position}里出现空话"${empty}"："${text}"。空话无法验收，换成可观察的结果。` });
+      issues.push({ field: 'acceptance', severity: 'error', message: `${position}里出现空话"${empty}"："${text}"。空话无法验收，换成可观察的结果。` });
       return;
     }
     if (text.length < 12) {
-      issues.push({ severity: 'error', message: `${position}太短："${text}"。写成一句能被验证的完整事实。` });
+      issues.push({ field: 'acceptance', severity: 'error', message: `${position}太短："${text}"。写成一句能被验证的完整事实。` });
       return;
     }
     const observable = /当|在.*时|则|后|看到|显示|出现|生成|返回|导出|收到|打开|点击|输入|填|超过|不超过|秒|分钟|条|个|份|字节|KB|MB|%|：|\d/.test(text);
     if (!observable) {
       issues.push({
+        field: 'acceptance',
         severity: 'warning',
         message: `${position}看不出可观察的结果："${text}"。建议改成 EARS 格式：当【前置条件】，在【动作】时，则【可观察的结果】。`
       });
@@ -587,22 +673,23 @@ export function checkAcceptance(items) {
 
 /** 校验某一步的答案是否满足退出条件 */
 export function validateAnswer(state, node, values) {
+  const normalized = normalizeValues(node, values);
   const issues = [];
   if (node.auto) {
-    if (!values.oneLiner) issues.push({ field: 'oneLiner', severity: 'error', message: 'S1.0 破冰：还没拿到"一句话描述"' });
+    if (!normalized.oneLiner) issues.push({ field: 'oneLiner', severity: 'error', message: 'S1.0 破冰：还没拿到"一句话描述"' });
   }
   for (const field of node.fields) {
-    issues.push(...validateField(node, field, values[field.key]));
+    issues.push(...validateField(node, field, normalized[field.key]));
   }
-  if (node.id === 'S1.7' && Array.isArray(values.acceptance)) {
-    issues.push(...checkAcceptance(values.acceptance));
+  if (node.id === 'S1.7' && Array.isArray(normalized.acceptance)) {
+    issues.push(...checkAcceptance(normalized.acceptance));
   }
   if (node.id === 'S1.8') {
-    const joined = `${values.techChoice || ''} ${values.techReason || ''}`;
-    if (!/选定/.test(joined)) {
+    const joined = `${normalized.techChoice || ''} ${normalized.techReason || ''}`;
+    if (!/(选定|选它|选择)/.test(joined)) {
       issues.push({ field: 'techChoice', severity: 'error', message: 'S1.8 技术栈雏形：必须明确写出"选定"了什么方案' });
     }
-    if (!/否决/.test(joined)) {
+    if (!/(否决|排除|放弃|不选)/.test(joined)) {
       issues.push({ field: 'techReason', severity: 'error', message: 'S1.8 技术栈雏形：必须写出"否决"了哪些方案及理由（出口门要求同时含"选定"与"否决"）' });
     }
   }
@@ -616,14 +703,18 @@ export function applyAnswer(state, stepId, values, meta = {}) {
   if (!values || typeof values !== 'object' || Array.isArray(values)) {
     throw new Error(`${stepId} ${node.name}：答案必须是一个对象，字段名取该步骤的 fields[].key`);
   }
+  const normalized = normalizeValues(node, values);
   const next = { ...state, steps: { ...state.steps }, answers: { ...state.answers } };
   if (!next.steps[stepId]) next.nextNumber += 1;
   next.steps[stepId] = { status: '✅', exitOk: true, at: meta.at || '' };
-  next.answers[stepId] = { ...(next.answers[stepId] || {}), ...values };
-  if (values.mode === 'light' || values.mode === 'heavy') next.mode = values.mode;
-  if (values.projectName) next.projectName = String(values.projectName).trim();
-  if (node.id === 'S1.4' && Array.isArray(values.deferred)) {
-    next.answers.deferred = [...new Set([...(next.answers.deferred || []), ...values.deferred])];
+  next.answers[stepId] = { ...(next.answers[stepId] || {}), ...normalized };
+  if (normalized.mode === 'light' || normalized.mode === 'heavy') next.mode = normalized.mode;
+  if (normalized.projectName) next.projectName = String(normalized.projectName).trim();
+  if (node.id === 'S1.4' && Array.isArray(next.answers[stepId].deferred)) {
+    // 归一化后再去重，否则 {item:"…"} 与 "…" 会被当成两条
+    const merged = [...(next.answers.deferred || []), ...next.answers[stepId].deferred].map(itemText);
+    next.answers[stepId].deferred = [...new Set(merged)];
+    next.answers.deferred = next.answers[stepId].deferred;
   }
   const following = nextNodeId(stepId);
   next.step = following || 'S1.9';
@@ -655,11 +746,88 @@ export function missingRequired(state) {
   return NODES.filter((node) => node.required && !isStepDone(state, node.id));
 }
 
+// ---------------------------------------------------------------------------
+// 分步提交（v0.2，报告 2.8-B）
+//
+// 断点那次失败是"一次塞了 11 条中文长句"的深嵌套参数在流式拼装时变成非法 JSON。
+// 参数长度和嵌套深度是唯一可复现的必要条件，所以插件这边的对策很直接：
+// 让每次 interview_advance 都只带一小批字段，并且每一步都能落盘、随时可续。
+// ---------------------------------------------------------------------------
+
+/** 估算一个字段提交进工具参数大约占多少字符：只用于分批，不必精确 */
+function estimateFieldChars(field) {
+  if (field.type === 'array') return Math.max(140, (field.minItems || 1) * 140);
+  if (field.type === 'object') return 200;
+  return Math.max(60, (field.minChars || 4) * 4);
+}
+
+/**
+ * 量一次提交的体积：字段数、参数字符数、数组条目数。
+ * 超限不拒收（答案照常落盘，绝不丢），只用来提醒下一次拆开交。
+ */
+export function measureSubmission(values) {
+  const entries = Object.entries(values || {});
+  const chars = JSON.stringify(values ?? {}).length;
+  const arrayItems = entries.reduce((sum, [, value]) => sum + (Array.isArray(value) ? value.length : 0), 0);
+  const reasons = [];
+  if (entries.length > SUBMIT_LIMITS.maxFields) reasons.push(`一次交了 ${entries.length} 个字段（上限 ${SUBMIT_LIMITS.maxFields} 个）`);
+  if (chars > SUBMIT_LIMITS.maxChars) reasons.push(`参数 ${chars} 字符（上限 ${SUBMIT_LIMITS.maxChars} 字符）`);
+  if (arrayItems > SUBMIT_LIMITS.maxItems) reasons.push(`数组条目 ${arrayItems} 条（上限 ${SUBMIT_LIMITS.maxItems} 条）`);
+  return { fields: entries.length, chars, arrayItems, oversized: reasons.length > 0, reasons };
+}
+
+/** 这一步还差哪些字段（按节点顺序）：没填的 + 校验报错的；可选字段不计入 */
+export function outstandingFields(node, merged, issues = []) {
+  const keys = new Set();
+  for (const field of node.fields) {
+    if (field.optional === true) continue;
+    const value = merged?.[field.key];
+    const empty = value === undefined || value === null || value === ''
+      || (Array.isArray(value) && value.length === 0);
+    if (empty) keys.add(field.key);
+  }
+  for (const issue of issues) {
+    if (issue.severity !== 'error') continue;
+    const key = String(issue.field || '').split('.')[0];
+    if (key && node.fields.some((field) => field.key === key && field.optional !== true)) keys.add(key);
+  }
+  return node.fields.filter((field) => keys.has(field.key)).map((field) => field.key);
+}
+
+/**
+ * 分步提交计划：把还没交的字段切成小批，每批 ≤ 3 个字段、估算 ≤ 1200 字符。
+ * 模型照着这个计划一批一批交，工具参数就一直是"小且结构简单"的。
+ */
+export function planSubmission(node, outstanding) {
+  const keys = (Array.isArray(outstanding) ? outstanding : []).filter((key) => node.fields.some((field) => field.key === key));
+  const batches = [];
+  let current = { fields: [], estimateChars: 0 };
+  for (const key of keys) {
+    const field = node.fields.find((item) => item.key === key);
+    const estimate = estimateFieldChars(field);
+    const full = current.fields.length >= SUBMIT_LIMITS.maxFields
+      || current.estimateChars + estimate > SUBMIT_LIMITS.maxChars;
+    if (current.fields.length && full) {
+      batches.push(current);
+      current = { fields: [], estimateChars: 0 };
+    }
+    current.fields.push(key);
+    current.estimateChars += estimate;
+  }
+  if (current.fields.length) batches.push(current);
+  return {
+    limits: { ...SUBMIT_LIMITS },
+    batches: batches.map((batch, index) => ({ call: index + 1, fields: batch.fields, estimateChars: batch.estimateChars })),
+    tip: '每次 interview_advance 只交一批（≤ 3 个字段、≤ 1200 字符），数组字段一次交 1-3 条；每交一批都已落盘，中途断了也不会丢。'
+  };
+}
+
 /** 出口门自检：逐条返回检查项与结论 */
 export function exitGateChecks(state) {
   const answers = state.answers;
   const prdText = renderPrd(state);
   const specText = renderSpec(state);
+  const allow = englishAllowlist(state);
   const checks = [];
   const add = (id, label, ok, detail) => checks.push({ id, label, ok, detail });
 
@@ -680,38 +848,108 @@ export function exitGateChecks(state) {
   add('spec-baseline', '项目说明书：需求基准描述覆盖场景/目标/约束/验收四要素',
     Boolean(answers['S1.4']?.scene && answers['S1.4']?.goal && answers['S1.4']?.constraints && (answers['S1.7']?.acceptance || []).length),
     '缺一不可');
-  add('no-placeholder', '全文无 {占位符} / TODO / TBD / ___ 残留',
-    !PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(prdText) || pattern.test(specText)), '扫描 prd.md 与项目说明书.md');
-  add('no-english', '全文无英文正文（术语、代码、URL 除外）',
-    !scanEnglish(prdText) && !scanEnglish(specText),
-    [scanEnglish(prdText), scanEnglish(specText)].filter(Boolean).join('；') || '未发现连续英文段落');
+  add('no-placeholder', '全文无占位符 / TODO / TBD / ___ 残留（URL、路由、行内代码里的尖括号除外）',
+    !scanPlaceholders(prdText) && !scanPlaceholders(specText),
+    scanPlaceholders(prdText) || scanPlaceholders(specText) || '扫描 prd.md 与项目说明书.md');
+  add('no-english', '全文无英文正文（术语、代码、URL、品牌名除外）',
+    !scanEnglish(prdText, { allow }) && !scanEnglish(specText, { allow }),
+    [scanEnglish(prdText, { allow }), scanEnglish(specText, { allow })].filter(Boolean).join('；') || '未发现英文正文');
   add('no-secret', '无密钥、密码、token 等敏感信息',
     !SECRET_PATTERNS.some((pattern) => pattern.test(prdText) || pattern.test(specText)), '扫描密钥特征');
 
   return checks;
 }
 
-/** 扫描英文正文：返回第一处可疑片段的说明，没有则返回 null */
-export function scanEnglish(text) {
-  const lines = String(text).split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('|') === false && trimmed.startsWith('#') === false && trimmed.startsWith('-') === false && trimmed.startsWith('>') === false) {
-      // 正文段落也扫，不做提前跳过
+/**
+ * 英文自检的白名单：项目名 + 术语表（报告 P6）。
+ * 产品名常常就是几个英文词（"Land of Knowledge"），不该被判成英文正文。
+ */
+export function englishAllowlist(state) {
+  const terms = Array.isArray(state?.terms) ? state.terms : [];
+  return [state?.projectName, ...terms].filter((term) => typeof term === 'string' && term.trim());
+}
+
+/** 去掉行内代码（`…`）：代码里的尖括号、花括号都是正当写法 */
+function stripInlineCode(line) {
+  return String(line).replace(/`[^`]*`/g, ' ');
+}
+
+/** URL / 路由 / 路径写法：<id>、<标签> 在这类上下文里是技术记法，不是没填的槽位（报告 P6） */
+function isRouteOrUrlLine(line) {
+  if (/[a-z][a-z0-9+.-]*:\/\//i.test(line)) return true;
+  return /(^|[^\w])\/[\w<{]/.test(line);
+}
+
+/**
+ * 占位符自检：返回第一处命中的说明，没有则 null。
+ *
+ * v0.2 按报告 P6 收窄了误伤面（v0.1 用的是一刀切的正则，把 `/posts/<id>/` 这种
+ * 正当的技术写法也判成了占位符）：
+ * - 行内代码里的内容不看；
+ * - 花括号里带引号、或"纯 ASCII + 冒号/等号"的，当成 JSON / 代码片段，不算占位；
+ * - 尖括号只在"不像 URL / 路由的行"里才算占位。
+ */
+export function scanPlaceholders(text) {
+  for (const raw of String(text).split('\n')) {
+    const line = stripInlineCode(raw.trim()).trim();
+    if (!line) continue;
+    const mustache = line.match(/\{\{[^}\n]{1,40}\}\}/);
+    if (mustache) return `模板占位符 ${mustache[0]}`;
+    if (/\bTODO\b/i.test(line) || /\bTBD\b/i.test(line)) return '残留 TODO/TBD';
+    if (/_{3,}/.test(line)) return '下划线占位';
+    const brace = line.match(/\{([^}\n]{1,40})\}/);
+    if (brace) {
+      const inner = brace[1];
+      const codeish = /["']/.test(inner) || (!CJK.test(inner) && /[:=]/.test(inner));
+      if (!codeish) return `花括号占位 ${brace[0]}`;
     }
-    if (/https?:\/\//.test(trimmed)) continue;
-    const match = trimmed.match(ENGLISH_RUN);
-    if (match && !/^[A-Za-z0-9_./@-]+$/.test(match[0])) {
-      return `出现连续英文：${match[0].slice(0, 40)}`;
-    }
+    if (isRouteOrUrlLine(line)) continue;
+    const angle = line.match(/<[^>\n]{1,30}>/);
+    if (angle) return `尖括号占位 ${angle[0]}`;
   }
   return null;
 }
 
+/**
+ * 扫描英文正文：返回第一处可疑片段的说明，没有则 null。
+ *
+ * v0.2 按报告 P6 收窄：只在"整行基本都是英文"时才算英文正文——
+ * 围栏代码块、行内代码、URL、含中文的行、以及去掉空白不足 40 字的短行都跳过
+ * （三段式英文品牌名 `Land of Knowledge` 因此不再误伤文档标题）。
+ * options.allow 里的项目名 / 品牌名 / 术语先剔掉再判定。
+ */
+export function scanEnglish(text, options = {}) {
+  const allow = (Array.isArray(options.allow) ? options.allow : [])
+    .filter((term) => typeof term === 'string' && term.trim())
+    .map((term) => term.trim());
+  let fenced = false;
+  for (const raw of String(text).split('\n')) {
+    const trimmed = raw.trim();
+    if (/^```/.test(trimmed)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    let line = stripInlineCode(trimmed).trim();
+    if (!line) continue;
+    for (const term of allow) line = line.split(term).join(' ');
+    line = line.trim();
+    if (!line || isRouteOrUrlLine(line)) continue;
+    if (CJK.test(line)) continue;
+    if (line.replace(/\s+/g, '').length < 40) continue;
+    const match = line.match(ENGLISH_RUN);
+    if (match) return `出现连续英文：${match[0].slice(0, 40)}`;
+  }
+  return null;
+}
+
+/** 列表渲染：{gap, handling} 走两段式，其余按文本渲染 */
 function bullet(items, emptyText) {
   if (!Array.isArray(items) || items.length === 0) return `- ${emptyText}`;
   return items
-    .map((item) => (typeof item === 'string' ? `- ${item}` : `- ${item.gap ? `${item.gap} → ${item.handling}` : JSON.stringify(item)}`))
+    .map((item) => (item && typeof item === 'object' && !Array.isArray(item) && item.gap !== undefined
+      ? `- ${pairText(item, ['gap', 'handling']).join(' → ')}`
+      : `- ${itemText(item)}`))
     .join('\n');
 }
 
@@ -726,7 +964,7 @@ export function baselineDescription(state) {
   const scene = a['S1.4']?.scene || '（场景待补）';
   const goal = a['S1.4']?.goal || '（目标待补）';
   const constraints = a['S1.4']?.constraints || '（约束待补）';
-  const acceptance = (a['S1.7']?.acceptance || []).join('；') || '（验收待补）';
+  const acceptance = (a['S1.7']?.acceptance || []).map(itemText).join('；') || '（验收待补）';
   return `场景：${scene}。目标：${goal}。约束：${constraints}。验收：${acceptance}。`;
 }
 
@@ -741,6 +979,8 @@ export function renderPrd(state) {
   const deferred = a['S1.4']?.deferred || [];
   const infoArch = a['S1.5']?.infoArch || [];
   const compliance = a['S1.6']?.compliance || {};
+  // 两段式条目的统一读法：不管交上来的是对象还是"入口 → 去向"的一行字，文档都一样渲染
+  const pair = (item, keys) => pairText(item, keys).join(' → ');
 
   return `# ${name} PRD
 
@@ -772,7 +1012,7 @@ ${bullet(a['S1.6']?.notDoing, '（待补：至少 1 条边界）')}
 
 | 目标 | 说明 | 成功标志（可验证） |
 |------|------|------------------|
-| ${a['S1.4']?.goal || '（待补）'} | 访谈 S1.4 确认的主目标 | ${acceptance[0] || '（待补）'} |
+| ${a['S1.4']?.goal || '（待补）'} | 访谈 S1.4 确认的主目标 | ${acceptance.length ? itemText(acceptance[0]) : '（待补）'} |
 
 ---
 
@@ -787,7 +1027,7 @@ ${bullet(a['S1.6']?.notDoing, '（待补：至少 1 条边界）')}
 ### 2.2 关键用户任务
 
 1. ${a['S1.4']?.scene || '（待补：用户进来先干嘛）'}
-2. ${(infoArch[0] && `${infoArch[0].entry} → ${infoArch[0].destination}`) || '（待补：再干嘛）'}
+2. ${infoArch.length ? pair(infoArch[0], ['entry', 'destination']) : '（待补：再干嘛）'}
 
 ### 2.3 ★ 形态与资源约束（最关键，别省）
 
@@ -809,7 +1049,7 @@ ${a['S1.3']?.formReason ? `> 形态理由：${a['S1.3'].formReason}` : ''}
 
 | 入口 | 路由 | 说明 |
 |------|------|------|
-${table(infoArch, '（无界面或待补）', (item) => `| ${item.entry} | ${item.destination} | 访谈 S1.5 确认 |`)}
+${table(infoArch, '（无界面或待补）', (item) => `| ${pairText(item, ['entry', 'destination'])[0]} | ${pairText(item, ['entry', 'destination'])[1]} | 访谈 S1.5 确认 |`)}
 
 ### 3.2 路由兜底规则
 
@@ -819,7 +1059,7 @@ ${table(infoArch, '（无界面或待补）', (item) => `| ${item.entry} | ${ite
 
 ### 3.3 页面结构总览
 
-${infoArch.length ? infoArch.map((item) => `- ${item.entry} → ${item.destination}`).join('\n') : '- （无界面，本节不适用）'}
+${infoArch.length ? infoArch.map((item) => `- ${pair(item, ['entry', 'destination'])}`).join('\n') : '- （无界面，本节不适用）'}
 
 ---
 
@@ -827,7 +1067,7 @@ ${infoArch.length ? infoArch.map((item) => `- ${item.entry} → ${item.destinati
 
 | 入口 | 点击后 |
 |------|-------|
-${table(infoArch, '（无界面或待补）', (item) => `| ${item.entry} | ${item.destination} |`)}
+${table(infoArch, '（无界面或待补）', (item) => `| ${pairText(item, ['entry', 'destination'])[0]} | ${pairText(item, ['entry', 'destination'])[1]} |`)}
 
 ---
 
@@ -835,7 +1075,7 @@ ${table(infoArch, '（无界面或待补）', (item) => `| ${item.entry} | ${ite
 
 | 情况 | 希望它怎么办 |
 |------|------------|
-${table(a['S1.4']?.dataJourney, '（待补）', (item) => `| ${item.gap} | ${item.handling} |`)}
+${table(a['S1.4']?.dataJourney, '（待补）', (item) => `| ${pairText(item, ['gap', 'handling'])[0]} | ${pairText(item, ['gap', 'handling'])[1]} |`)}
 
 ---
 
@@ -855,13 +1095,13 @@ ${compliance.forbidden || '（无特别要求；不承诺固定结果、不公�
 
 | 编号 | 验收项 | 通过标准 |
 |------|-------|---------|
-${acceptance.length ? acceptance.map((item, index) => `| A${index + 1} | ${item} | 手动执行后结果与描述一致 |`).join('\n') : '| — | （待补） | — |'}
+${acceptance.length ? acceptance.map((item, index) => `| A${index + 1} | ${itemText(item)} | 手动执行后结果与描述一致 |`).join('\n') : '| — | （待补） | — |'}
 
 ---
 
 ## 10. MVP 完成定义
 
-${mvp.length ? mvp.map((item, index) => `${index + 1}. ${item}`).join('\n') : '1. （待补）'}
+${mvp.length ? mvp.map((item, index) => `${index + 1}. ${itemText(item)}`).join('\n') : '1. （待补）'}
 
 ---
 
@@ -869,7 +1109,7 @@ ${mvp.length ? mvp.map((item, index) => `${index + 1}. ${item}`).join('\n') : '1
 
 | 方向 | 说明 |
 |------|------|
-${table(deferred, '（暂无）', (item) => `| ${typeof item === 'string' ? item : item.item || JSON.stringify(item)} | 访谈中记录，本期不做 |`)}
+${table(deferred, '（暂无）', (item) => `| ${itemText(item)} | 访谈中记录，本期不做 |`)}
 `;
 }
 
@@ -921,11 +1161,11 @@ ${tech || '（待补：S1.8 技术栈雏形）'}
 
 ## 验收清单
 
-${toLines(a['S1.7']?.acceptance, (item) => `- [ ] ${item}`) || '- [ ] （待补）'}
+${toLines(a['S1.7']?.acceptance, (item) => `- [ ] ${itemText(item)}`) || '- [ ] （待补）'}
 
 ## "以后再说"清单
 
-${toLines(deferred, (item) => `- ${typeof item === 'string' ? item : item.item || JSON.stringify(item)}`) || '- （暂无）'}
+${toLines(deferred, (item) => `- ${itemText(item)}`) || '- （暂无）'}
 
 ## 决策复盘 / 案例库
 
@@ -974,11 +1214,11 @@ export function renderDevDoc(state) {
 
 本期范围：
 
-${toLines(a['S1.7']?.mvp, (item) => `- ${item}`, '- （待补）')}
+${toLines(a['S1.7']?.mvp, (item) => `- ${itemText(item)}`, '- （待补）')}
 
 本期不做：
 
-${toLines(a['S1.6']?.notDoing, (item) => `- ${typeof item === 'string' ? item : item.item}`, '- （待补）')}
+${toLines(a['S1.6']?.notDoing, (item) => `- ${itemText(item)}`, '- （待补）')}
 
 ## 2. 总体架构
 

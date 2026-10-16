@@ -1,6 +1,6 @@
 {
   "name": "dsh-vibe-coding-prd",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "访谈式需求 Agent：一次只问一件事，把一个说不清需求的人带到一份 AI 能直接照着开工的 PRD。",

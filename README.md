@@ -36,6 +36,36 @@
 | 验收标准质量 | 靠模型自律 | 空话黑名单 + 可观察性检查，不合格过不了门 |
 | 出口门自检 | 靠模型自查清单 | 11 条机器校验，**有一条没过就不写任何文件** |
 | 产物结构 | 模型自己组织文档 | 按固定结构渲染，无占位符残留 |
+| 账本归属 | 靠模型记得传对目录 | 目录不可信就拒绝执行；账本记工作目录，不一致不续接 |
+| 单次参数体积 | 靠模型自己拿捏 | 生成分步提交计划，一批一落盘，超限给提醒 |
+
+---
+
+## 仓库结构
+
+```
+.
+├── packages/
+│   └── dsh-vibe-coding-prd/     # ★ 插件本体（可单独发布到 npm / 插件市场）
+│       ├── index.js             # Host 半边：七个访谈工具 + 技能注册
+│       ├── engine.js            # 纯逻辑：节点定义、校验门、账本、文档渲染
+│       ├── skills/
+│       │   └── vibe-coding-interview.md   # 注册给宿主的访谈行为规范
+│       ├── test/                # 引擎层 + 工具层自测（零依赖，裸 Node 可跑）
+│       ├── cordis.patch.yml     # 补丁层：把插件行插入 profile 组合
+│       ├── icon.svg             # 插件卡片图标
+│       └── README.md            # 插件自己的说明（英文版，中文版 README.zh.md）
+├── docs/                        # 真实产物示例：访谈跑完落盘的三份文件
+│   ├── prd.md                   # 产品需求文档
+│   ├── 项目说明书.md             # 贯穿项目的"活文档"
+│   └── 进度账本.md               # 十步走到哪、跳步留痕（插件自动维护）
+├── .github/workflows/test.yml   # CI：push / PR 自动跑自测
+├── CONTRIBUTING.md              # 贡献与维护说明（含发布检查清单）
+├── CHANGELOG.md
+└── LICENSE                      # MIT
+```
+
+`docs/` 是跑完十步后的真实产物，可以直接对照产出长什么样。
 
 ---
 
@@ -46,7 +76,7 @@
 在 Harness 会话里让 agent 执行，`target` 填插件的**绝对路径**：
 
 ```
-plugin_manager  action=install_bundle  target=< >/packages/dsh-vibe-coding-prd
+plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-coding-prd
 ```
 
 成功后 profile 的 `package.json` 会多出该依赖，补丁层插入 `vibe-coding-prd` 一行。
@@ -55,9 +85,10 @@ plugin_manager  action=install_bundle  target=< >/packages/dsh-vibe-coding-prd
 ### 方式二：从 GitHub 安装
 
 ```powershell
-dsh plugin --profile desktop add github:<user>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
+dsh plugin --profile desktop add github:<你的用户名>/dsh-vibe-coding-prd#path:packages/dsh-vibe-coding-prd
 ```
 
+`#path:` 后缀指向仓库里的子目录（pnpm 的子目录依赖语法）。
 
 ### 方式三：从 npm 安装
 
@@ -79,17 +110,13 @@ dsh plugin --profile desktop add dsh-vibe-coding-prd
 
 > 我想做个 XX，但不知道怎么跟 AI 说
 
->请帮我生成xx产品需求文档prd
-
-……
-
 然后它会走完这套流程（工具名 → 实际动作）：
 
 ```
 interview_start      读账本（或新建）→ "我们现在在 S1.0，第一个问题……"
 interview_next       取当前这一问的提问稿：问什么、给用户哪些选项、退出条件是什么
 （模型把问题发给你 —— 选项会渲染成可点按钮）
-interview_advance    记答案并过门；缺东西就返回缺口清单，流程停在本步
+interview_advance    记答案并过门；一次只交 1-3 个字段，缺东西就返回缺口清单 + 下一批交什么
 … 重复 10 步 …
 interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明书.md
 ```
@@ -112,15 +139,31 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 
 | 工具 | 作用 | 关键返回 |
 |------|------|---------|
-| `interview_start` | 开场 / 续接：读账本恢复进度，不存在就初始化到 S1.0 | `resumed`、`step`、`mode`、`missingRequired` |
-| `interview_next` | 取当前这一问：提问稿、给用户的选项、退出条件、已收字段 | `ask`、`fields`、`options`、`exitCondition`、`lightGroup` |
-| `interview_advance` | 记答案并判断退出条件；部分答案也可提交 | `advanced`、`gaps`、`warnings`、`next` |
+| `interview_start` | 开场 / 续接：读账本恢复进度，不存在就初始化到 S1.0；项目目录不确定或账本属于别处时拒绝执行 | `resumed`、`step`、`mode`、`project`、`missingRequired` |
+| `interview_next` | 取当前这一问：提问稿、给用户的选项、退出条件、已收字段、分步提交计划 | `ask`、`fields`、`options`、`exitCondition`、`submissionPlan` |
+| `interview_advance` | 记答案并判断退出条件；**一次只交 1-3 个字段**，每批立即落盘 | `advanced`、`gaps`、`stillMissing`、`oversized`、`next` |
 | `interview_skip` | 跳过可选步骤并留痕；必经步骤一律拒绝 | `skipped`、`reason` |
-| `interview_finalize` | 出口门自检 + 落盘两份（或三份）文档 | `written`、`checks`、`blocking`、`files` |
-| `interview_status` | 只读查看进度、跳步留痕、阻塞项 | 全量步骤状态 |
+| `interview_finalize` | 出口门自检 + 落盘两份（或三份）文档；`terms` 可加英文自检白名单 | `written`、`checks`、`blocking`、`files` |
+| `interview_status` | 只读查看进度、跳步留痕、阻塞项、目录归属异常 | 全量步骤状态 |
 | `interview_ask` | 直接把当前这一问弹给你并等回答（选项渲染成按钮） | `answer` |
 
 七个工具的 `parameters` 都是标准 JSON Schema，返回值都是 JSON，`output.render` 给出一行中文摘要。
+
+---
+
+## 两条 v0.2 的硬规矩（都是踩过坑补的）
+
+**一、分步提交：一次只交 1-3 个字段。** 工具参数由模型流式拼出来，参数越长、嵌套越深，
+越容易在拼装环节产出非法 JSON——harness 判定 `MALFORMED_RESPONSE` 就中止整轮，之前做完的步骤全部作废
+（真实案例：一轮 45 步、89 次工具调用，废在最后一个"11 条中文长句 + 深嵌套对象"的参数上）。
+所以 `interview_next` 会给一份 `submissionPlan` 把字段切成小批，`interview_advance` 每收一批立即落盘；
+一次交多了不拒收（答案绝不丢），但会带 `oversized` 警告告诉模型下一步怎么拆。
+模型若中途断了，上一批的进度已经在 `docs/` 里，补一句"请继续"就能接上。
+
+**二、账本不串项目。** 项目目录只认显式 `workspace` 或**会话工作目录**：
+拿不到就拒绝执行，**不再回落到宿主进程的当前目录**（那可能是 profile 目录，里面躺着别的项目的账本）。
+账本头部与状态文件都记下工作目录，加载时比对；不一致就不续接、不写文件，只报告"发现历史账本在别处"，
+并给出两条路：`adoptWorkspace: true`（目录确实搬了家）或换对的 `workspace` / `reset: true`。
 
 ---
 
@@ -159,13 +202,16 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 - [ ] 验收标准 ≥ 1 条且具体可验证（"系统正常""体验良好"这类空话直接拒绝）
 - [ ] MVP 完成定义 ≥ 1 条
 - [ ] 需求基准描述覆盖场景 / 目标 / 约束 / 验收
-- [ ] 无 `{占位符}` / TODO / TBD / `___` 残留
-- [ ] 无英文正文（术语、代码、URL 除外）
+- [ ] 无占位符 / TODO / TBD / `___` 残留（URL、路由、行内代码里的 `<id>` / `<标签>` 不算占位）
+- [ ] 无英文正文（术语、代码、URL、品牌名除外；标题里的 "Land of Knowledge" 这类品牌名不再误伤）
 - [ ] 无密钥、密码、token 等敏感信息
 
 全过之后才落盘，并给出这句声明：
 
 > ✅ S1 出口门通过：prd.md / 项目说明书已写、账本 S1 已标完成、无占位符、格式合规。
+
+第 9、10 两条 v0.2 起收窄了判定：真被误判时把产品名 / 品牌名 / 术语放进 `interview_finalize` 的
+`terms` 重新过门，**不要为了让自检通过去改产品名或改写法**。
 
 ---
 
@@ -174,13 +220,13 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 插件本体**零依赖**，不需要 `npm install`，裸 Node 直接跑：
 
 ```bash
-node packages/dsh-vibe-coding-prd/test/engine.test.mjs   # 引擎层 22 项
-node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 19 项
+node packages/dsh-vibe-coding-prd/test/engine.test.mjs   # 引擎层 36 项
+node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 28 项
 ```
 
 工具层测试用一个假 ctx 收集注册的工具，然后照真实调用顺序把整场访谈点一遍，
-覆盖三条只有真跑才看得见的约束：**退出条件不满足必须停在本步**、**必填步骤不能跳**、
-**出口门没过不许写文件**。
+覆盖这些只有真跑才看得见的约束：**退出条件不满足必须停在本步**、**必填步骤不能跳**、
+**出口门没过不许写文件**、**目录不可信时不执行**、**分批提交每批都落盘**。
 
 
 ---

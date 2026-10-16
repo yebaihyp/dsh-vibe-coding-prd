@@ -16,6 +16,14 @@
  * 零依赖是刻意的：宿主从安装位置解析 @deepseek-ai/*，工作区里的插件解析不到，
  * 所以这里不导入 defineTool，直接按注册表契约写原生 JSON Schema 的工具定义。
  *
+ * v0.2 按《会话中断分析报告》（2026-10-15）改了四件事：
+ *   1. 分步提交（报告 2.8-B）：interview_advance 支持一次只交 1-3 个字段，
+ *      interview_next 返回分批计划，避免一次塞十几个长字段导致参数流拼出非法 JSON；
+ *   2. 工作目录守卫（P3）：项目目录只能来自显式 workspace 或会话 cwd，不再回落到
+ *      宿主进程当前目录；账本记录工作目录，不一致就拒绝续接；
+ *   3. 形状归一化（P5）：{item:"…"} 与字符串都认，写入状态前统一成规范形状；
+ *   4. 自检收窄（P6）：URL/路由里的尖括号、三段式英文品牌名不再被误判。
+ *
  * 设计取舍见 README.md。
  */
 import { readFileSync } from 'node:fs';
@@ -26,22 +34,29 @@ import {
   NODES,
   LIGHT_GROUPS,
   FORM_OPTIONS,
+  SUBMIT_LIMITS,
   applyAnswer,
   baselineDescription,
   canSkip,
-  checkAcceptance,
   createState,
+  englishAllowlist,
   exitGateChecks,
+  itemText,
+  measureSubmission,
   missingRequired,
   nodeById,
+  normalizeValues,
+  outstandingFields,
   parseLedger,
+  planSubmission,
   renderDevDoc,
   renderLedger,
   renderPrd,
   renderSpec,
   scanEnglish,
   skipStep,
-  stepStatus
+  stepStatus,
+  validateAnswer
 } from './engine.js';
 
 /** 插件名，用作账本里的路径提示 */
@@ -71,10 +86,80 @@ function today() {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-/** 解析工作目录：显式传入优先，否则用宿主进程的当前目录 */
-function workspaceDir(explicit) {
-  if (typeof explicit === 'string' && explicit.trim()) return resolve(explicit.trim());
-  return resolve(process.cwd());
+/** 展示用路径：统一正斜杠，避免 Windows 反斜杠在 Markdown/JSON 里被转义 */
+function slash(path) {
+  return String(path).replace(/\\/g, '/');
+}
+
+/** 会话工作目录：宿主把会话 cwd 放在 agent.session.header.cwd（内置 bash 工具也是这么取的） */
+function sessionWorkspace(exec) {
+  const cwd = exec?.agent?.session?.header?.cwd;
+  return typeof cwd === 'string' && cwd.trim() ? cwd.trim() : null;
+}
+
+/**
+ * 解析项目目录（v0.2，报告 P3）。顺序：显式 workspace → 会话 cwd；两者都没有就拒绝执行。
+ *
+ * 刻意**不**回落到 process.cwd()：宿主进程的当前目录可能是 profile 目录
+ * （`~/.dsh/profiles/<profile>`），那里很可能躺着别的项目的账本——v0.1 就是这么
+ * 把"机器学习讲解网站"的账本当成当前项目的进度续上的。宁可不干活，也不要串项目。
+ */
+function resolveWorkspace(explicit, exec) {
+  if (typeof explicit === 'string' && explicit.trim()) return { dir: resolve(explicit.trim()), source: 'argument' };
+  const cwd = sessionWorkspace(exec);
+  if (cwd) return { dir: resolve(cwd), source: 'session' };
+  return { dir: null, source: 'none' };
+}
+
+/** 拿不到可信项目目录时的统一回应：不写任何文件，把选择交回模型和用户 */
+function needsWorkspace(source) {
+  const hostCwd = slash(resolve(process.cwd()));
+  return {
+    ok: false,
+    refused: true,
+    reason: 'needs-workspace',
+    workspaceSource: source,
+    hostCwd,
+    message:
+      '没能确定项目目录，本次不执行任何操作。请显式传 workspace（项目目录的绝对路径）后重试。' +
+      `插件不会回落到宿主进程的当前目录（${hostCwd}）——那里可能放着别的项目的账本。`
+  };
+}
+
+/** 路径比较：Windows 下大小写不敏感，其余平台按原样比 */
+function samePath(left, right) {
+  const normalize = (value) => slash(String(value).trim()).replace(/\/+$/, '');
+  const a = normalize(left);
+  const b = normalize(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** 账本记录的工作目录与本次解析出的不一致：不续接、不写文件（报告 P3 建议 2、3） */
+function workspaceConflict(state, dir) {
+  if (!state || !state.workspace || samePath(state.workspace, dir)) return null;
+  return { recorded: state.workspace, requested: slash(dir) };
+}
+
+/** 目录归属不一致时的统一回应 */
+function conflictPayload(conflict) {
+  return {
+    ok: false,
+    refused: true,
+    reason: 'workspace-mismatch',
+    workspace: conflict.requested,
+    ledgerWorkspace: conflict.recorded,
+    message:
+      `这个目录里的账本记的是另一个工作目录：${conflict.recorded}。为了不把两个项目搅在一起，本次不写任何文件。` +
+      '先跟用户确认项目目录：目录搬过家，就用 interview_start 传 adoptWorkspace=true 接管；' +
+      '确认开的是另一个项目，就换对的 workspace，或用 reset=true 另起一份。'
+  };
+}
+
+/** 老状态文件（v0.1）没记工作目录：补记上，返回 true 表示这条是补的 */
+function ensureWorkspace(state, dir) {
+  if (typeof state.workspace === 'string' && state.workspace.trim()) return false;
+  state.workspace = dir;
+  return true;
 }
 
 function ledgerFile(dir) {
@@ -120,12 +205,16 @@ async function loadState(dir, projectName) {
   if (saved) {
     if (projectName && !saved.projectName) saved.projectName = projectName;
     if (!saved.updatedAt) saved.updatedAt = today();
+    if (!Array.isArray(saved.terms)) saved.terms = [];
+    if (typeof saved.workspace !== 'string') saved.workspace = '';
     return saved;
   }
   // 旁挂文件缺失（例如用户手动清过 docs/）：退回只认账本里的流程进度
   const text = await readLedger(dir);
   const parsed = text ? parseLedger(text) : null;
   const state = parsed || createState(projectName);
+  if (!Array.isArray(state.terms)) state.terms = [];
+  if (typeof state.workspace !== 'string') state.workspace = '';
   if (projectName && !state.projectName) state.projectName = projectName;
   if (!state.updatedAt) state.updatedAt = today();
   return state;
@@ -206,7 +295,8 @@ function brief(state, node) {
       '能推断的别问：从用户已说的话或常识能推出来的，直接作为推荐默认值让他确认。',
       '先问问题再谈方案；先定约束再定形态，最后才碰技术。',
       '用户说完一段，用三五句话复述"我目前理解到的"，让他随时纠正。',
-      '拿到答案后调用 interview_advance 记录；退出条件不满足时它会告诉你还缺什么。'
+      `分步提交：拿到答案后调用 interview_advance，一次只交 1-3 个字段（见 submissionPlan），剩下的下一次补——每次调用都会落盘，中断不会丢进度。`,
+      '退出条件不满足时它会返回 gaps 与"下一次只交哪批"，照着补问即可。'
     ],
     nextAction:
       node.id === 'S1.9'
@@ -261,102 +351,27 @@ function safeSummary(summarize, value) {
   }
 }
 
-/** 校验并合并一次答案；返回 { advanced, issues, state, node, next } */
+/**
+ * 校验并合并一次答案；返回 { advanced, issues, state, node, merged }
+ *
+ * 校验规则只有一份，在 engine.validateAnswer 里（v0.2 起）：v0.1 这里另抄了一份，
+ * 于是两处规则会走偏（报告 P5 的形状问题就是这么漏过去的）。
+ * 合并前先按字段定义归一化形状，状态文件里存的就是规范形状。
+ */
 function commitAnswer(state, node, values) {
-  const merged = { ...(state.answers[node.id] || {}), ...values };
+  const normalized = normalizeValues(node, values);
+  const merged = { ...(state.answers[node.id] || {}), ...normalized };
   if (node.id === 'S1.4' && Array.isArray(merged.deferred)) {
-    merged.deferred = [...new Set([...state.answers.deferred || [], ...merged.deferred])];
+    merged.deferred = [...new Set([...(state.answers.deferred || []), ...merged.deferred].map(itemText))];
   }
   const probe = { ...state, answers: { ...state.answers, [node.id]: merged } };
-  const issues = [...validate(node, merged)];
-  if (node.id === 'S1.8') {
-    const joined = `${merged.techChoice || ''} ${merged.techReason || ''}`;
-    if (!/(选定|选它|选择)/.test(joined)) {
-      issues.push({ field: 'techChoice', severity: 'error', message: 'S1.8 出口门要求写明"选定"了什么方案' });
-    }
-    if (!/(否决|排除|放弃|不选)/.test(joined)) {
-      issues.push({ field: 'techReason', severity: 'error', message: 'S1.8 出口门要求写明"否决"了哪些方案及理由' });
-    }
-  }
+  const issues = validateAnswer(state, node, merged);
   const blocking = issues.filter((issue) => issue.severity === 'error');
   if (blocking.length) {
     return { advanced: false, issues, state: probe, merged, node };
   }
   const advancedState = applyAnswer(state, node.id, merged, { at: today() });
   return { advanced: true, issues, state: advancedState, merged, node };
-}
-
-/** 复用引擎的字段校验：把合并后的答案交给引擎判断 */
-function validate(node, merged) {
-  const issues = [];
-  for (const field of node.fields) {
-    const value = merged[field.key];
-    issues.push(...validateOne(node, field, value));
-  }
-  if (node.id === 'S1.7' && Array.isArray(merged.acceptance)) {
-    issues.push(...checkAcceptance(merged.acceptance));
-  }
-  return issues;
-}
-
-/** 单字段校验（与 engine.validateAnswer 同规则，这里按合并后的值判断） */
-function validateOne(node, field, value) {
-  const issues = [];
-  const optional = field.optional === true;
-  if (value === undefined || value === null || value === '') {
-    if (!optional) issues.push({ field: field.key, severity: 'error', message: `${field.label}：还没填（${field.hint}）` });
-    return issues;
-  }
-  if (field.type === 'array') {
-    if (!Array.isArray(value) || value.length === 0) {
-      if (!optional) issues.push({ field: field.key, severity: 'error', message: `${field.label}：至少要 1 条（${field.hint}）` });
-      return issues;
-    }
-    if (field.minItems && value.length < field.minItems) {
-      issues.push({ field: field.key, severity: 'error', message: `${field.label}：至少要 ${field.minItems} 条` });
-    }
-    value.forEach((item, index) => {
-      const text = typeof item === 'string' ? item : JSON.stringify(item);
-      if (!text || text.length < 2) {
-        issues.push({ field: field.key, severity: 'error', message: `${field.label} 第 ${index + 1} 条太短` });
-      }
-      if (field.itemShape?.length === 2 && item && typeof item === 'object') {
-        const [a, b] = field.itemShape;
-        for (const key of [a, b]) {
-          if (!item[key] || String(item[key]).length < 2) {
-            issues.push({ field: field.key, severity: 'error', message: `${field.label} 第 ${index + 1} 条缺少「${key}」${field.itemHint ? `：${field.itemHint}` : ''}` });
-          }
-        }
-      }
-    });
-    return issues;
-  }
-  if (field.type === 'object') {
-    if (typeof value !== 'object') {
-      issues.push({ field: field.key, severity: 'error', message: `${field.label}：要写成对象（${field.hint}）` });
-      return issues;
-    }
-    for (const key of field.requiredKeys || []) {
-      const cell = value[key];
-      const text = typeof cell === 'string' ? cell : JSON.stringify(cell ?? '');
-      if (!text || text.length < 2) {
-        issues.push({
-          field: `${field.key}.${key}`,
-          severity: 'error',
-          message: `${field.label}：缺「${field.properties?.[key]?.label || key}」（${field.properties?.[key]?.hint || ''}）`
-        });
-      }
-    }
-    return issues;
-  }
-  const text = String(value).trim();
-  if (field.enum && !field.enum.includes(text)) {
-    issues.push({ field: field.key, severity: 'error', message: `${field.label}：只能取 ${field.enum.join(' / ')}` });
-  }
-  if (field.minChars && text.length < field.minChars) {
-    issues.push({ field: field.key, severity: 'error', message: `${field.label}：至少 ${field.minChars} 个字，现在 ${text.length} 个` });
-  }
-  return issues;
 }
 
 /** 向用户直接提问（有答案器时才用；回答会变成一条用户消息） */
@@ -411,34 +426,95 @@ const apply = (ctx) => {
       name: 'interview_start',
       description:
         '开始或续接一次 vibe-coding-prd 需求访谈。它读 docs/进度账本.md 恢复进度（不存在就照模板创建），并把"当前走到哪一步、下一步做什么"报给你。' +
+        '项目目录必须能确定：显式传 workspace，或者宿主提供了会话工作目录；两者都没有时它会拒绝执行，而不是回落到宿主进程的当前目录。' +
+        '账本里记的工作目录与本次不一致时也会拒绝，只报告"发现历史账本在别处"——目录确实搬过家就传 adoptWorkspace=true 接管。' +
+        '续接成功后会返回项目名与进度，先跟用户确认这是同一个项目再往下走。' +
         '当用户说"我想做个 XX 但不知道怎么跟 AI 说""帮我理需求""帮我写个 PRD""我有个想法，帮我想清楚再开工"，或在准备开新项目却还没定清楚要做什么时，先调用它。',
       parameters: {
         projectName: { type: 'string', description: '产品名称；还不确定就留空，S1.9 落盘时再定' },
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' },
-        reset: { type: 'boolean', description: 'true 时丢弃已有账本，从头开始一次访谈（默认 false）' }
+        workspace: {
+          type: 'string',
+          description: '项目目录的绝对路径；留空则用会话的工作目录。不要传 profile 目录或临时目录——账本会落在那里'
+        },
+        reset: { type: 'boolean', description: 'true 时丢弃已有账本，从头开始一次访谈（默认 false）' },
+        adoptWorkspace: {
+          type: 'boolean',
+          description: '仅当账本记的工作目录与当前目录不一致、且确认是把项目目录搬到了这里时传 true，用它接管旧账本'
+        }
       },
-      summarize: (value) =>
-        `访谈已就位：当前 ${value.step} ${value.stepName}（模式 ${value.mode}，进度 ${value.progress.done}/${value.progress.total}）。${value.summary}`,
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
-        const existing = await readLedger(dir);
-        const resumed = Boolean(existing) && args.reset !== true;
-        const state = resumed ? await loadState(dir, args.projectName) : createState(args.projectName);
+      summarize: (value) => {
+        if (value.refused) return `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`;
+        const progress = value.progress ? `${value.progress.done}/${value.progress.total}` : '?';
+        return `访谈已就位：当前 ${value.step} ${value.stepName}（模式 ${value.mode}，进度 ${progress}）。${value.summary}`;
+      },
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const dir = ws.dir;
+
+        const ledgerText = await readLedger(dir);
+        const savedState = await readStateFile(dir);
+        if (args.reset === true || (!ledgerText && !savedState)) {
+          const fresh = createState(args.projectName);
+          fresh.workspace = dir;
+          await saveState(dir, fresh);
+          const node = nodeById(fresh.step) || NODES[0];
+          return {
+            ok: true,
+            resumed: false,
+            reset: args.reset === true,
+            workspace: slash(dir),
+            workspaceSource: ws.source,
+            ledger: `${slash(dir)}/${LEDGER_PATH}`,
+            step: fresh.step,
+            stepName: node.name,
+            mode: '待判定',
+            progress: progressOf(fresh),
+            missingRequired: missingRequired(fresh).map((item) => `${item.id} ${item.name}`),
+            summary: args.reset === true
+              ? '已按 reset=true 丢掉旧账本，从 S1.0 重新开始。'
+              : '账本已初始化到 S1.0，这是第一轮访谈。',
+            nextAction: '调用 interview_next 取当前这一问。'
+          };
+        }
+
+        const state = await loadState(dir, args.projectName);
+        const conflict = workspaceConflict(state, dir);
+        const progress = progressOf(state);
+        if (conflict && args.adoptWorkspace !== true) {
+          return {
+            ...conflictPayload(conflict),
+            projectName: state.projectName || null,
+            step: state.step,
+            progress,
+            summary: `发现历史账本在别处：它记的项目名是"${state.projectName || '未命名'}"，进度 ${progress.done}/${progress.total}。`
+          };
+        }
+        const adopted = conflict ? true : ensureWorkspace(state, dir);
+        if (conflict) state.workspace = dir;
         await saveState(dir, state);
         const node = nodeById(state.step) || NODES[0];
         const missing = missingRequired(state);
         return {
-          resumed,
-          workspace: dir,
-          ledger: `${dir}/${LEDGER_PATH}`.replace(/\\/g, '/'),
+          ok: true,
+          resumed: true,
+          workspace: slash(dir),
+          workspaceSource: ws.source,
+          workspaceAdopted: adopted,
+          ledger: `${slash(dir)}/${LEDGER_PATH}`,
+          project: {
+            name: state.projectName || null,
+            step: state.step,
+            mode: state.mode ? MODE_LABELS[state.mode] : '待判定',
+            updatedAt: state.updatedAt || null
+          },
           step: state.step,
           stepName: node.name,
           mode: state.mode ? MODE_LABELS[state.mode] : '待判定',
-          progress: progressOf(state),
+          progress,
           missingRequired: missing.map((item) => `${item.id} ${item.name}`),
-          summary: resumed
-            ? `从账本续接，正在进行 ${node.id} ${node.name}。`
-            : '账本已初始化到 S1.0，这是第一轮访谈。',
+          summary: `从账本续接，正在进行 ${node.id} ${node.name}。`,
+          confirm: `续接的是"${state.projectName || '未命名'}"这个项目（进度 ${progress.done}/${progress.total}）吗？先跟用户对一下项目名，不对就换对的 workspace，或用 reset=true 另起一份。`,
           nextAction: '调用 interview_next 取当前这一问。'
         };
       }
@@ -450,20 +526,41 @@ const apply = (ctx) => {
     tool({
       name: 'interview_next',
       description:
-        '取出当前这一步的提问稿：要问什么、为什么这么问、给用户哪些选项、退出条件是什么、还缺哪些信息。' +
+        '取出当前这一步的提问稿：要问什么、为什么这么问、给用户哪些选项、退出条件是什么、还缺哪些信息，' +
+        '外加 submissionPlan（分步提交计划：把这一步的字段切成小批，每次只交一批）。' +
         '拿到后按 ask 字段把问题发给用户（可以用 interview_ask 直接弹给用户点选），拿到答案再调用 interview_advance 记录。',
       parameters: {
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' }
+        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
-      summarize: (value) => `S1 当前：${value.step} ${value.stepName}｜要问：${value.header}｜退出条件：${value.exitCondition}`,
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
-        const state = await loadState(dir);
+      summarize: (value) => (value.refused
+        ? `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`
+        : value.finished
+          ? '十步访谈已走完，可以落盘。'
+          : `S1 当前：${value.step} ${value.stepName}｜要问：${value.header}｜退出条件：${value.exitCondition}`),
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const state = await loadState(ws.dir);
+        const conflict = workspaceConflict(state, ws.dir);
+        if (conflict) return conflictPayload(conflict);
         const node = nodeById(state.step);
         if (!node) {
-          return { finished: true, message: '十步访谈已全部走完。调用 interview_finalize 落盘并过出口门。' };
+          return { ok: true, finished: true, message: '十步访谈已全部走完。调用 interview_finalize 落盘并过出口门。' };
         }
-        return { finished: false, ...brief(state, node) };
+        const merged = state.answers[node.id] || {};
+        const outstanding = outstandingFields(node, merged, validateAnswer(state, node, merged));
+        const plan = planSubmission(node, outstanding);
+        return {
+          ok: true,
+          finished: false,
+          workspace: slash(ws.dir),
+          ...brief(state, node),
+          stillMissing: outstanding,
+          submissionPlan: plan,
+          ...(outstanding.length > 1
+            ? { submissionRule: `这一步还有 ${outstanding.length} 个字段没交：分步提交，每次 interview_advance 只交一批（见 submissionPlan.batches，每批 ≤ ${SUBMIT_LIMITS.maxFields} 个字段），别一次塞完。` }
+            : {})
+        };
       }
     })
   );
@@ -474,42 +571,78 @@ const apply = (ctx) => {
       name: 'interview_advance',
       description:
         '把刚问到的答案记进当前步骤，并判断退出条件是否满足。' +
-        'values 是"字段名 → 内容"的对象，字段名取 interview_next 返回的 fields[].key；用户只答了一部分也可以提交，未满足的退出条件会以 gaps 返回——此时流程停在本步，绝不跳步。' +
+        'values 是"字段名 → 内容"的对象，字段名取 interview_next 返回的 fields[].key。\n' +
+        '分步提交（重要）：一次只交 1-3 个字段、总长不超过 1200 字符，剩下的下一次补——' +
+        '工具参数是流式拼出来的，一次塞十几个长字段（尤其深嵌套对象 + 多条中文长句）容易拼出非法 JSON，' +
+        'harness 会判定 MALFORMED_RESPONSE 并中止整轮。每次调用都会立即落盘，所以分批提交不会丢进度；' +
+        'interview_next 返回的 submissionPlan 已经替你分好了批。\n' +
+        '用户只答了一部分也可以提交，未满足的退出条件会以 gaps 返回——此时流程停在本步，绝不跳步。' +
         '敏感信息（密钥、密码、token）不要写进这里，账本和文档都会被落盘。',
       parameters: {
-        values: { type: 'object', additionalProperties: true, required: true, description: '本步的答案对象，例如 {"oneLiner":"给不会写代码的人做竞品调研的小工具","audience":"我自己"}' },
+        values: {
+          type: 'object',
+          additionalProperties: true,
+          required: true,
+          description: '本批答案，字段名取 interview_next 的 fields[].key，例如 {"oneLiner":"给不会写代码的人做竞品调研的小工具","audience":"我自己"}；一次 1-3 个字段'
+        },
         note: { type: 'string', description: '可选：给账本备注或用户原话摘要' },
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' }
+        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
-      summarize: (value) =>
-        value.advanced
+      summarize: (value) => {
+        if (value.refused) return `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`;
+        return value.advanced
           ? `已过门：${value.step} ${value.stepName} ✅，下一步 ${value.next?.step || '访谈结束'}。`
-          : `未过门：${value.step} 还缺 ${value.gaps.length} 项，流程停在本步。`,
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
+          : `未过门：${value.step} 还缺 ${value.gaps.length} 项，流程停在本步。`;
+      },
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const dir = ws.dir;
         const state = await loadState(dir);
+        const conflict = workspaceConflict(state, dir);
+        if (conflict) return conflictPayload(conflict);
+        ensureWorkspace(state, dir);
         const node = nodeById(state.step);
-        if (!node) return { advanced: false, message: '十步已走完，请改用 interview_finalize。' };
-        if (!args.values || typeof args.values !== 'object') {
-          return { advanced: false, step: node.id, gaps: [{ message: 'values 必须是一个对象，字段名取 interview_next 的 fields[].key' }] };
+        if (!node) return { ok: true, advanced: false, message: '十步已走完，请改用 interview_finalize。' };
+        if (!args.values || typeof args.values !== 'object' || Array.isArray(args.values)) {
+          return { ok: false, advanced: false, step: node.id, gaps: [{ message: 'values 必须是一个对象，字段名取 interview_next 的 fields[].key' }] };
         }
         if (node.id === 'S1.9' && args.values.projectName) state.projectName = String(args.values.projectName).trim();
 
+        const size = measureSubmission(args.values);
         const result = commitAnswer(state, node, args.values);
+        if (size.oversized) {
+          result.issues.push({
+            field: 'values',
+            severity: 'warning',
+            message:
+              `本次提交偏大：${size.reasons.join('；')}。答案已经落盘，但下一次请按分步提交来交：` +
+              `每次 ≤ ${SUBMIT_LIMITS.maxFields} 个字段、≤ ${SUBMIT_LIMITS.maxChars} 字符——参数越大越容易在流式拼装时产出非法 JSON，整轮都会作废。`
+          });
+        }
         const nextState = result.state;
         if (args.note) nextState.notes = String(args.note).slice(0, 200);
         await saveState(dir, nextState);
 
+        const outstanding = outstandingFields(node, result.merged, result.issues);
+        const plan = planSubmission(node, outstanding);
         const nextNode = nodeById(nextState.step);
         const payload = {
+          ok: true,
           advanced: result.advanced,
           step: node.id,
           stepName: node.name,
-          recorded: Object.keys(result.merged),
+          saved: true,
+          submitted: Object.keys(args.values),
+          collected: Object.keys(result.merged),
+          stillMissing: outstanding,
+          submissionPlan: plan,
+          ...(size.oversized ? { oversized: size } : {}),
           issues: result.issues,
           gaps: result.issues.filter((issue) => issue.severity === 'error'),
           warnings: result.issues.filter((issue) => issue.severity === 'warning'),
-          ledger: `${dir}/${LEDGER_PATH}`.replace(/\\/g, '/'),
+          workspace: slash(dir),
+          ledger: `${slash(dir)}/${LEDGER_PATH}`,
           progress: progressOf(nextState),
           next: nextNode ? { step: nextNode.id, stepName: nextNode.name } : null
         };
@@ -518,8 +651,15 @@ const apply = (ctx) => {
             node.id === 'S1.9'
               ? 'S1 十步已全部过门。调用 interview_finalize 落盘两份文档并过出口门。'
               : `已过门。下一步：调用 interview_next 取 ${nextNode.id} ${nextNode.name} 的提问稿。`;
+          if (size.oversized) {
+            payload.message += ` 提醒：本次参数偏大（${size.reasons.join('；')}），下一步按分步提交来交，一次别超过 ${SUBMIT_LIMITS.maxFields} 个字段。`;
+          }
         } else {
-          payload.message = `退出条件未满足，停在本步。补问这些缺口后再次调用 interview_advance：${payload.gaps.map((g) => g.message).join('；')}`;
+          const firstBatch = plan.batches[0]?.fields || [];
+          payload.message =
+            `退出条件未满足，停在本步。本批已落盘：${Object.keys(args.values).join('、') || '（空）'}。` +
+            `还缺：${payload.gaps.map((gap) => gap.message).join('；')}` +
+            (firstBatch.length ? `。下一次只交这批：${firstBatch.join('、')}（分步提交，别一次塞完）` : '');
         }
         return payload;
       }
@@ -535,12 +675,21 @@ const apply = (ctx) => {
         '只有 required=false 的步骤可以跳（S1.5 信息架构、S1.8 技术栈雏形），必经步骤一律拒绝；理由必须具体，例如"纯脚本，无界面"。',
       parameters: {
         reason: { type: 'string', required: true, description: '跳步理由，至少 4 个字，会原样写进账本' },
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' }
+        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
-      summarize: (value) => (value.skipped ? `已跳过 ${value.step} ${value.stepName}：${value.reason}` : `不能跳过：${value.message}`),
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
+      summarize: (value) => (value.refused
+        ? `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`
+        : value.skipped
+          ? `已跳过 ${value.step} ${value.stepName}：${value.reason}`
+          : `不能跳过：${value.message}`),
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const dir = ws.dir;
         const state = await loadState(dir);
+        const conflict = workspaceConflict(state, dir);
+        if (conflict) return conflictPayload(conflict);
+        ensureWorkspace(state, dir);
         const node = nodeById(state.step);
         if (!node) return { skipped: false, message: '十步已走完，请改用 interview_finalize。' };
         if (!canSkip(node)) {
@@ -573,30 +722,55 @@ const apply = (ctx) => {
       description:
         '执行 S1 出口门自检并落盘 docs/prd.md 与 docs/项目说明书.md（可选 docs/开发文档.md）。' +
         '自检逐项返回 pass/fail：必经步骤是否全过、元信息与版本、核心定位、明确不做、形态、可验证验收、无占位符、无英文正文、无敏感信息。' +
-        '只要还有 error 级未通过，就不会写文件——先把缺口补上再来。落盘成功后提示用户可以进入 S2 架构选型，或提议生成 HTML 原型。',
+        '自检误伤正当写法时，把产品名 / 品牌名 / 术语放进 terms 再试一次（英文正文与尖括号占位两条检查都认这份白名单）。' +
+        '落盘成功后提示用户可以进入 S2 架构选型，或提议生成 HTML 原型。',
       parameters: {
         projectName: { type: 'string', description: '产品名称；已在 S1.9 记过就不用再传' },
         includeDevDoc: { type: 'boolean', description: '是否同时产出 docs/开发文档.md（进入正式开发时用，默认 false）' },
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' }
+        terms: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '英文自检白名单：产品名 / 品牌名 / 术语（例如 "Land of Knowledge"），会累积进状态文件'
+        },
+        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
-      summarize: (value) =>
-        value.written
+      summarize: (value) => {
+        if (value.refused) return `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`;
+        return value.written
           ? `出口门通过，已落盘：${value.files.map((file) => file.split('/').pop()).join('、')}`
-          : `出口门未通过，未写任何文件。待补：${value.blocking.map((item) => item.label).join('；')}`,
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
+          : `出口门未通过，未写任何文件。待补：${value.blocking.map((item) => item.label).join('；')}`;
+      },
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const dir = ws.dir;
         const state = await loadState(dir, args.projectName);
+        const conflict = workspaceConflict(state, dir);
+        if (conflict) return conflictPayload(conflict);
+        ensureWorkspace(state, dir);
         if (args.projectName) state.projectName = String(args.projectName).trim();
+        if (args.terms !== undefined) {
+          const incoming = (Array.isArray(args.terms) ? args.terms : [args.terms])
+            .map((term) => String(term ?? '').trim())
+            .filter(Boolean);
+          state.terms = [...new Set([...(Array.isArray(state.terms) ? state.terms : []), ...incoming])];
+        } else if (!Array.isArray(state.terms)) {
+          state.terms = [];
+        }
 
         const checks = exitGateChecks(state);
         const blocking = checks.filter((item) => !item.ok);
         if (blocking.length) {
+          const englishBlocked = blocking.some((item) => item.id === 'no-english');
           return {
             written: false,
-            workspace: dir,
+            workspace: slash(dir),
             checks,
             blocking,
-            message: `出口门未通过，未写任何文件。请补完这些项：${blocking.map((item) => `${item.label}（${item.detail}）`).join('；')}`
+            terms: englishAllowlist(state),
+            message:
+              `出口门未通过，未写任何文件。请补完这些项：${blocking.map((item) => `${item.label}（${item.detail}）`).join('；')}` +
+              (englishBlocked ? '。如果被判成英文正文的其实是产品名 / 品牌名 / 术语，把它放进 terms 参数再调一次，不要为了过门去改名。' : '')
           };
         }
 
@@ -608,23 +782,25 @@ const apply = (ctx) => {
         state.notes = 'S1 出口门已过，可进入 S2 架构选型';
         const files = [];
         await writeTextFile(prdPath, renderPrd(state));
-        files.push(prdPath.replace(/\\/g, '/'));
+        files.push(slash(prdPath));
         await writeTextFile(specPath, renderSpec(state));
-        files.push(specPath.replace(/\\/g, '/'));
+        files.push(slash(specPath));
         if (args.includeDevDoc === true) {
           const devPath = join(dir, 'docs', '开发文档.md');
           await writeTextFile(devPath, renderDevDoc(state));
-          files.push(devPath.replace(/\\/g, '/'));
+          files.push(slash(devPath));
         }
         await saveState(dir, state);
 
-        const english = scanEnglish(renderPrd(state)) || scanEnglish(renderSpec(state));
+        const allow = englishAllowlist(state);
+        const english = scanEnglish(renderPrd(state), { allow }) || scanEnglish(renderSpec(state), { allow });
         return {
           written: true,
-          workspace: dir,
+          workspace: slash(dir),
           files,
           checks,
           blocking: [],
+          terms: allow,
           ...(english ? { review: `建议复核疑似英文正文：${english}` } : {}),
           baseline: baselineDescription(state),
           declaration:
@@ -642,17 +818,34 @@ const apply = (ctx) => {
       name: 'interview_status',
       description:
         '只读查看当前访谈进度：模式、每一步的状态、跳步留痕、阻塞项、还缺什么。' +
-        '不改任何文件。用户问"我们走到哪了""还剩什么"时用它回答。',
+        '不改任何文件。用户问"我们走到哪了""还剩什么"时用它回答。' +
+        '若账本记的工作目录与本次不一致，会返回 workspaceMismatch——此时续接类操作都会被拒绝。',
       parameters: {
-        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用当前工作目录' }
+        workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
-      summarize: (value) => `访谈进度：${value.step} ${value.stepName}（${value.progress.done}/${value.progress.total} 完成）`,
-      async execute(args) {
-        const dir = workspaceDir(args.workspace);
+      summarize: (value) => (value.refused
+        ? `未执行：${value.reason === 'needs-workspace' ? '缺少项目目录' : '账本属于别的工作目录'}。`
+        : `访谈进度：${value.step} ${value.stepName}（${value.progress.done}/${value.progress.total} 完成）`),
+      async execute(args, exec) {
+        const ws = resolveWorkspace(args.workspace, exec);
+        if (!ws.dir) return needsWorkspace(ws.source);
+        const dir = ws.dir;
         const state = await loadState(dir);
+        const conflict = workspaceConflict(state, dir);
         const node = nodeById(state.step);
         return {
-          workspace: dir,
+          ok: true,
+          workspace: slash(dir),
+          ...(conflict
+            ? {
+                workspaceMismatch: {
+                  ledgerWorkspace: conflict.recorded,
+                  message:
+                    `这个目录里的账本记的是 ${conflict.recorded}，与当前目录不一致：续接、过门、落盘都会被拒绝，` +
+                    '直到用 interview_start adoptWorkspace=true 接管，或换对的 workspace。'
+                }
+              }
+            : {}),
           projectName: state.projectName || null,
           mode: state.mode ? MODE_LABELS[state.mode] : '待判定',
           step: state.step,

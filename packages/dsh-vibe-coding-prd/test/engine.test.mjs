@@ -12,14 +12,21 @@
 import assert from 'node:assert/strict';
 import {
   NODES,
+  SUBMIT_LIMITS,
   checkAcceptance,
   createState,
   exitGateChecks,
+  measureSubmission,
   missingRequired,
+  normalizeValues,
+  outstandingFields,
   parseLedger,
+  planSubmission,
   renderLedger,
   renderPrd,
   renderSpec,
+  scanEnglish,
+  scanPlaceholders,
   skipStep,
   applyAnswer,
   validateAnswer,
@@ -238,6 +245,101 @@ check('无敏感信息（密钥特征）', () => {
   const state = runInterview();
   const checks = exitGateChecks(state);
   assert.equal(checks.find((item) => item.id === 'no-secret').ok, true);
+});
+
+console.log('\n[5] v0.2：形状归一化 / 自检收窄 / 分步提交 / 工作目录');
+check('{item:"…"} 与字符串两种形状都能读', () => {
+  const normalized = normalizeValues(nodeById('S1.6'), { notDoing: [{ item: '本期不做登录' }, '本期不做计费'] });
+  assert.deepEqual(normalized.notDoing, ['本期不做登录', '本期不做计费']);
+});
+check('归一化后文档里不会出现 [object Object] 或 {"item"', () => {
+  const state = runInterview({
+    'S1.6': { notDoing: [{ item: '本期不做登录和多人协作' }] },
+    'S1.7': {
+      acceptance: [{ item: '当我填入 5 个竞品链接并点击生成，则在 60 秒内出现一份对比表' }],
+      mvp: [{ item: '能对 5 个竞品跑通一次并导出报告' }]
+    }
+  });
+  const prd = renderPrd(state);
+  assert.doesNotMatch(prd, /\[object Object\]|\{"item"/);
+  assert.match(prd, /- 本期不做登录和多人协作/);
+  assert.match(prd, /\| A1 \| 当我填入 5 个竞品链接并点击生成/);
+  assert.equal(exitGateChecks(state).find((item) => item.id === 'no-placeholder').ok, true);
+});
+check('两段式条目写成一行也能读（"首页 → 结果页"）', () => {
+  const normalized = normalizeValues(nodeById('S1.5'), { infoArch: ['首页 → 结果页'] });
+  assert.deepEqual(normalized.infoArch, [{ entry: '首页', destination: '结果页' }]);
+  const state = runInterview({ 'S1.5': { infoArch: ['首页 → 结果页'] } });
+  assert.match(renderPrd(state), /\| 首页 \| 结果页 \|/);
+});
+check('验收标准用 {item} 形状也能过校验', () => {
+  const issues = checkAcceptance([{ item: '当我填入 5 个竞品链接并点击生成，则在 60 秒内出现一份对比表' }]);
+  assert.equal(issues.filter((issue) => issue.severity === 'error').length, 0);
+});
+check('占位符自检：URL / 路由 / 行内代码里的尖括号放行', () => {
+  assert.equal(scanPlaceholders('- 详情页路由：`/posts/<id>/`'), null);
+  assert.equal(scanPlaceholders('- 标签页：/tags/<标签>/'), null);
+  assert.equal(scanPlaceholders('- 主页：https://<用户名>.github.io/'), null);
+  assert.equal(scanPlaceholders('- 返回体示例：{"name":"abc","count":3}'), null);
+});
+check('占位符自检：真没填的槽位照样拦', () => {
+  assert.match(scanPlaceholders('# {产品名} PRD'), /花括号/);
+  assert.match(scanPlaceholders('这里是 {{待填}}'), /模板占位/);
+  assert.match(scanPlaceholders('负责人：<你的名字>'), /尖括号/);
+  assert.match(scanPlaceholders('- [ ] TODO 补一节'), /TODO/);
+  assert.match(scanPlaceholders('名称：___'), /下划线/);
+});
+check('英文自检：三段式品牌名不再误伤', () => {
+  assert.equal(scanEnglish('# Land of Knowledge PRD\n'), null);
+  assert.equal(scanEnglish('| Land of Knowledge | 面向自学者 | 自学路线'), null);
+});
+check('英文自检：成段英文仍然会被抓出来', () => {
+  const paragraph = 'This product is designed for self learners who want to organise their knowledge in a single place.';
+  assert.match(scanEnglish(paragraph), /连续英文/);
+  assert.equal(scanEnglish('```\nconst name = "Land of Knowledge for All Learners";\n```'), null);
+});
+check('英文自检：白名单里的项目名 / 品牌名先被剔掉', () => {
+  const line = '1. Land of Knowledge Platform for Everyone Who Learns';
+  assert.match(scanEnglish(line), /连续英文/);
+  assert.equal(scanEnglish(line, { allow: ['Land of Knowledge Platform for Everyone Who Learns'] }), null);
+});
+check('分步提交：字段多时会切成小批', () => {
+  const plan = planSubmission(nodeById('S1.4'), ['scene', 'goal', 'constraints', 'dataJourney', 'deferred']);
+  assert.ok(plan.batches.length >= 2, '应当切成多批');
+  for (const batch of plan.batches) {
+    assert.ok(batch.fields.length <= SUBMIT_LIMITS.maxFields, `每批不超过 ${SUBMIT_LIMITS.maxFields} 个字段`);
+  }
+  assert.deepEqual(plan.batches[0].fields, ['scene', 'goal', 'constraints']);
+  assert.match(plan.tip, /落盘/);
+});
+check('分步提交：体积超限会被量出来', () => {
+  assert.equal(measureSubmission({ mode: 'light' }).oversized, false);
+  const big = measureSubmission({ a: '1', b: '2', c: '3', d: '4' });
+  assert.equal(big.oversized, true);
+  assert.equal(big.fields, 4);
+  assert.match(big.reasons.join('|'), /字段/);
+});
+check('还缺哪些字段：可选字段不计入，报错的字段计入', () => {
+  assert.deepEqual(outstandingFields(nodeById('S1.6'), { notDoing: ['本期不做登录'] }, []), []);
+  assert.deepEqual(outstandingFields(nodeById('S1.7'), { acceptance: ['当我填入链接并点击生成'] }, []), ['mvp']);
+  const issues = validateAnswer(createState(''), nodeById('S1.9'), { projectName: 'A' });
+  assert.deepEqual(outstandingFields(nodeById('S1.9'), { projectName: 'A' }, issues), ['projectName']);
+});
+check('账本往返带上工作目录', () => {
+  const state = runInterview({ 'S1.5': null, 'S1.8': null });
+  state.workspace = 'D:\\demo-project';
+  const text = renderLedger(state);
+  assert.match(text, /- 工作目录：D:\\demo-project/);
+  assert.equal(parseLedger(text).workspace, 'D:\\demo-project');
+});
+check('账本往返带上阶段备注与阶段状态', () => {
+  const state = runInterview({ 'S1.5': null, 'S1.8': null });
+  state.stage = 'S2';
+  state.notes = 'S1 出口门已过，可进入 S2 架构选型';
+  const restored = parseLedger(renderLedger(state));
+  assert.equal(restored.stage, 'S2');
+  assert.equal(restored.notes, 'S1 出口门已过，可进入 S2 架构选型');
+  assert.equal(restored.projectName, '竞品调研助手');
 });
 
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);

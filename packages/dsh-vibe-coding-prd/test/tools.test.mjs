@@ -14,7 +14,7 @@
  * 插件本体零依赖（不导入 @deepseek-ai/*），所以裸 Node 就能直接加载。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,10 +63,10 @@ function fakeContext() {
 }
 
 /** 按定义调用一个工具（模拟工具分发：校验做最小化，重活交给 execute） */
-async function call(registry, toolName, args) {
+async function call(registry, toolName, args, exec = { agent: { id: 'session-test' }, callId: 'call-1', signal: undefined }) {
   const definition = registry.get(toolName);
   assert.ok(definition, `工具未注册：${toolName}`);
-  return definition.execute(args, { agent: { id: 'session-test' }, callId: 'call-1', signal: undefined });
+  return definition.execute(args, exec);
 }
 
 const GOOD = {
@@ -289,6 +289,182 @@ await check('多选标记会透传到提问请求', async () => {
   assert.equal(asked[1].questions[0].multiSelect, true);
 });
 
+console.log('\n[5] v0.2：工作目录守卫');
+const guardRoot = await mkdtemp(join(tmpdir(), 'vibe-prd-guard-'));
+
+await check('拿不到可信项目目录时拒绝执行（不回落到宿主进程当前目录）', async () => {
+  const result = await call(registry, 'interview_start', {});
+  assert.equal(result.refused, true);
+  assert.equal(result.reason, 'needs-workspace');
+  assert.equal(result.workspaceSource, 'none');
+  assert.match(result.message, /workspace/);
+  assert.match(result.message, /不会回落到宿主进程的当前目录/);
+});
+await check('有会话工作目录时不必显式传 workspace', async () => {
+  const sessionDir = join(guardRoot, 'session-project');
+  await mkdir(sessionDir, { recursive: true });
+  const exec = { agent: { id: 'session-test', session: { header: { cwd: sessionDir } } }, callId: 'call-2' };
+  const result = await call(registry, 'interview_start', {}, exec);
+  assert.equal(result.resumed, false);
+  assert.equal(result.workspaceSource, 'session');
+  assert.equal(result.workspace, sessionDir.replace(/\\/g, '/'));
+  assert.ok(existsSync(join(sessionDir, 'docs', '进度账本.md')));
+});
+await check('账本记的工作目录与本次不一致时拒绝续接', async () => {
+  const dir = join(guardRoot, 'moved-project');
+  await mkdir(join(dir, 'docs'), { recursive: true });
+  // 造一份"从别处搬过来"的状态：账本里记的是旧路径
+  const moved = {
+    version: 2,
+    projectName: '搬家前的项目',
+    workspace: 'D:\\old-place\\demo',
+    stage: 'S1',
+    stageName: '需求对齐',
+    step: 'S1.3',
+    mode: 'light',
+    updatedAt: '2026-10-15',
+    nextNumber: 4,
+    steps: { 'S1.0': { status: '✅', exitOk: true } },
+    answers: { 'S1.0': { oneLiner: '给不写代码的人做竞品调研', audience: '我自己' } },
+    skipped: [],
+    blocks: [],
+    terms: [],
+    notes: ''
+  };
+  await writeFile(join(dir, 'docs', '.vibe-coding-prd-state.json'), `${JSON.stringify(moved, null, 2)}\n`, 'utf8');
+  const refused = await call(registry, 'interview_start', { workspace: dir });
+  assert.equal(refused.refused, true);
+  assert.equal(refused.reason, 'workspace-mismatch');
+  assert.equal(refused.ledgerWorkspace, 'D:\\old-place\\demo');
+  assert.match(refused.message, /另一个工作目录/);
+
+  const adopt = await call(registry, 'interview_start', { workspace: dir, adoptWorkspace: true });
+  assert.equal(adopt.resumed, true);
+  assert.equal(adopt.workspaceAdopted, true);
+  assert.match(adopt.confirm, /搬家前的项目/);
+  const status = await call(registry, 'interview_status', { workspace: dir });
+  assert.equal(status.workspaceMismatch, undefined);
+});
+
+console.log('\n[6] v0.2：分步提交（报告 2.8-B）');
+await check('interview_next 给出分批计划', async () => {
+  const dir = join(guardRoot, 'stepwise');
+  await call(registry, 'interview_start', { workspace: dir, projectName: '分步提交项目' });
+  for (const step of ['S1.0', 'S1.1', 'S1.2', 'S1.3']) {
+    const result = await call(registry, 'interview_advance', { workspace: dir, values: GOOD[step] });
+    assert.equal(result.advanced, true, `${step} 应当放行：${JSON.stringify(result.gaps)}`);
+  }
+  const brief = await call(registry, 'interview_next', { workspace: dir });
+  assert.equal(brief.step, 'S1.4');
+  assert.ok(brief.submissionPlan.batches.length >= 2, 'S1.4 的字段应当被切成多批');
+  assert.ok(brief.submissionPlan.batches[0].fields.length <= 3);
+  assert.deepEqual(brief.stillMissing, ['scene', 'goal', 'constraints', 'dataJourney']);
+  assert.match(brief.submissionRule, /分步提交/);
+});
+await check('只交一个字段也能落盘，并指出下一批交什么', async () => {
+  const dir = join(guardRoot, 'stepwise');
+  const first = await call(registry, 'interview_advance', { workspace: dir, values: { scene: GOOD['S1.4'].scene } });
+  assert.equal(first.advanced, false);
+  assert.equal(first.saved, true);
+  assert.deepEqual(first.submitted, ['scene']);
+  assert.ok(first.stillMissing.includes('goal'));
+  assert.ok(first.submissionPlan.batches[0].fields.length <= 3);
+  assert.match(first.message, /下一次只交这批/);
+
+  const second = await call(registry, 'interview_advance', {
+    workspace: dir,
+    values: { goal: GOOD['S1.4'].goal, constraints: GOOD['S1.4'].constraints }
+  });
+  assert.equal(second.advanced, false);
+  assert.deepEqual(second.stillMissing, ['dataJourney']);
+
+  // 中间态确实落了盘：重新取这一步时，前面交的字段还在
+  const again = await call(registry, 'interview_next', { workspace: dir });
+  assert.equal(again.alreadyCollected.scene, GOOD['S1.4'].scene);
+  assert.equal(again.alreadyCollected.goal, GOOD['S1.4'].goal);
+
+  const third = await call(registry, 'interview_advance', {
+    workspace: dir,
+    values: { dataJourney: GOOD['S1.4'].dataJourney, deferred: GOOD['S1.4'].deferred }
+  });
+  assert.equal(third.advanced, true, JSON.stringify(third.gaps));
+  assert.equal(third.next.step, 'S1.5');
+});
+await check('一次交太多字段：答案照收，但会给分步提交的提醒', async () => {
+  const dir = join(guardRoot, 'oversized');
+  await call(registry, 'interview_start', { workspace: dir });
+  const result = await call(registry, 'interview_advance', {
+    workspace: dir,
+    values: { oneLiner: GOOD['S1.0'].oneLiner, audience: GOOD['S1.0'].audience, extraA: 'x', extraB: 'y' }
+  });
+  assert.equal(result.advanced, true);
+  assert.equal(result.oversized.fields, 4);
+  assert.match(result.warnings.map((item) => item.message).join('|'), /偏大/);
+  assert.match(result.message, /分步提交/);
+});
+
+console.log('\n[7] v0.2：形状与自检不再误伤');
+
+/** 在指定目录里把十步跑完（可覆盖某一步的答案），返回落盘结果 */
+async function runFullInterview(dir, overrides = {}) {
+  const values = { ...GOOD, ...overrides };
+  await call(registry, 'interview_start', { workspace: dir, projectName: values['S1.9'].projectName });
+  for (const step of ['S1.0', 'S1.1', 'S1.2', 'S1.3', 'S1.4']) {
+    const result = await call(registry, 'interview_advance', { workspace: dir, values: values[step] });
+    assert.equal(result.advanced, true, `${step} 应当放行：${JSON.stringify(result.gaps)}`);
+  }
+  await call(registry, 'interview_skip', { workspace: dir, reason: '纯脚本，无界面' });
+  const boundary = await call(registry, 'interview_advance', { workspace: dir, values: values['S1.6'] });
+  assert.equal(boundary.advanced, true, `S1.6 应当放行：${JSON.stringify(boundary.gaps)}`);
+  const accept = await call(registry, 'interview_advance', { workspace: dir, values: values['S1.7'] });
+  assert.equal(accept.advanced, true, `S1.7 应当放行：${JSON.stringify(accept.gaps)}`);
+  await call(registry, 'interview_skip', { workspace: dir, reason: '本地脚本，不需要额外技术栈' });
+  const named = await call(registry, 'interview_advance', { workspace: dir, values: values['S1.9'] });
+  assert.equal(named.advanced, true, `S1.9 应当放行：${JSON.stringify(named.gaps)}`);
+  return call(registry, 'interview_finalize', { workspace: dir });
+}
+
+const shapeDir = join(guardRoot, 'shape');
+await check('{item:"…"} 形状的答案能过门，文档里不出现 [object Object]', async () => {
+  const result = await runFullInterview(shapeDir, {
+    'S1.6': { notDoing: [{ item: '本期不做登录和多人协作' }] },
+    'S1.7': {
+      acceptance: [{ item: GOOD['S1.7'].acceptance[0] }],
+      mvp: [{ item: GOOD['S1.7'].mvp[0] }]
+    }
+  });
+  assert.equal(result.written, true, JSON.stringify(result.blocking));
+  const prd = await readFile(join(shapeDir, 'docs', 'prd.md'), 'utf8');
+  assert.doesNotMatch(prd, /\[object Object\]|\{"item"/);
+  assert.match(prd, /- 本期不做登录和多人协作/);
+  assert.match(prd, /\| A1 \| 当我填入 5 个竞品链接并点击生成/);
+});
+await check('账本里记下了工作目录', async () => {
+  const ledger = await readFile(join(shapeDir, 'docs', '进度账本.md'), 'utf8');
+  assert.match(ledger, new RegExp(`- 工作目录：${shapeDir.replace(/\\/g, '\\\\')}`));
+});
+
+const brandDir = join(guardRoot, 'brand');
+await check('三段式英文品牌名不再让出口门误判', async () => {
+  const overrides = {
+    'S1.7': { acceptance: GOOD['S1.7'].acceptance, mvp: ['Knowledge Graph Platform for Everyone Who Learns'] },
+    'S1.9': { projectName: 'Land of Knowledge' }
+  };
+  const blocked = await runFullInterview(brandDir, overrides);
+  assert.equal(blocked.written, false);
+  assert.ok(blocked.blocking.some((item) => item.id === 'no-english'));
+  assert.match(blocked.message, /terms/);
+  // 标题行与正文里的项目名本来就不再误伤；这条不含项目名的长句交给 terms 白名单
+  const passed = await call(registry, 'interview_finalize', {
+    workspace: brandDir,
+    terms: ['Knowledge Graph Platform for Everyone Who Learns']
+  });
+  assert.equal(passed.written, true, JSON.stringify(passed.blocking));
+  assert.ok(passed.terms.includes('Land of Knowledge'));
+  assert.ok(passed.terms.includes('Knowledge Graph Platform for Everyone Who Learns'));
+});
+
+await rm(guardRoot, { recursive: true, force: true });
 await rm(workspace, { recursive: true, force: true });
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);
 if (failures.length) {
