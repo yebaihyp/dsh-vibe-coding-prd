@@ -38,6 +38,7 @@
 | 产物结构 | 模型自己组织文档 | 按固定结构渲染，无占位符残留 |
 | 账本归属 | 靠模型记得传对目录 | 目录不可信就拒绝执行；账本记工作目录，不一致不续接 |
 | 单次参数体积 | 靠模型自己拿捏 | 生成分步提交计划，一批一落盘，超限给提醒 |
+| 提问正文 | 靠模型逐字复述长稿 | 正文由插件按 `step` 渲染，模型只传短标识；自由文本有长度上限 |
 
 ---
 
@@ -46,15 +47,14 @@
 ```
 .
 ├── packages/
-│   └── dsh-vibe-coding-prd/     # ★ 插件本体（可单独发布到 npm / 插件市场）
+│   └── dsh-vibe-coding-prd/     # ★ 插件本体
 │       ├── index.js             # Host 半边：七个访谈工具 + 技能注册
-│       ├── engine.js            # 纯逻辑：节点定义、校验门、账本、文档渲染
+│       ├── engine.js            # 纯逻辑：节点定义、提问稿、校验门、账本、文档渲染
 │       ├── skills/
 │       │   └── vibe-coding-interview.md   # 注册给宿主的访谈行为规范
 │       ├── test/                # 引擎层 + 工具层自测（零依赖，裸 Node 可跑）
 │       ├── cordis.patch.yml     # 补丁层：把插件行插入 profile 组合
-│       ├── icon.svg             # 插件卡片图标
-│       └── README.md            # 插件自己的说明（英文版，中文版 README.zh.md）
+│       └── icon.svg             # 插件卡片图标
 ├── docs/                        # 真实产物示例：访谈跑完落盘的三份文件
 │   ├── prd.md                   # 产品需求文档
 │   ├── 项目说明书.md             # 贯穿项目的"活文档"
@@ -79,7 +79,7 @@
 plugin_manager  action=install_bundle  target=<本仓库>/packages/dsh-vibe-coding-prd
 ```
 
-成功后 profile 的 `package.json` 会多出该依赖，补丁层插入 `vibe-coding-prd` 一行。
+成功后 profile 的 `package.json` 会多出该依赖，补丁层插入 `dsh-vibe-coding-prd` 一行。
 **装完需要重启 Harness 宿主**——DSH 把模块代次缓存在进程里，热切换不会加载新的 `index.js`。
 
 ### 方式二：从 GitHub 安装
@@ -114,8 +114,8 @@ dsh plugin --profile desktop add dsh-vibe-coding-prd
 
 ```
 interview_start      读账本（或新建）→ "我们现在在 S1.0，第一个问题……"
-interview_next       取当前这一问的提问稿：问什么、给用户哪些选项、退出条件是什么
-（模型把问题发给你 —— 选项会渲染成可点按钮）
+interview_next       取当前这一问：怎么问（askHint）、给用户的选项、退出条件、还缺什么
+interview_ask        弹这一问给你 —— 正文由插件念、选项渲染成可点按钮（模型只传 step）
 interview_advance    记答案并过门；一次只交 1-3 个字段，缺东西就返回缺口清单 + 下一批交什么
 … 重复 10 步 …
 interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明书.md
@@ -140,14 +140,37 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 | 工具 | 作用 | 关键返回 |
 |------|------|---------|
 | `interview_start` | 开场 / 续接：读账本恢复进度，不存在就初始化到 S1.0；项目目录不确定或账本属于别处时拒绝执行 | `resumed`、`step`、`mode`、`project`、`missingRequired` |
-| `interview_next` | 取当前这一问：提问稿、给用户的选项、退出条件、已收字段、分步提交计划 | `ask`、`fields`、`options`、`exitCondition`、`submissionPlan` |
+| `interview_next` | 取当前这一问：怎么问（`askHint`）、给用户的选项、退出条件、已收字段、分步提交计划 | `askHint`、`fields`、`options`、`exitCondition`、`submissionPlan` |
 | `interview_advance` | 记答案并判断退出条件；**一次只交 1-3 个字段**，每批立即落盘 | `advanced`、`gaps`、`stillMissing`、`oversized`、`next` |
 | `interview_skip` | 跳过可选步骤并留痕；必经步骤一律拒绝 | `skipped`、`reason` |
 | `interview_finalize` | 出口门自检 + 落盘两份（或三份）文档；`terms` 可加英文自检白名单 | `written`、`checks`、`blocking`、`files` |
 | `interview_status` | 只读查看进度、跳步留痕、阻塞项、目录归属异常 | 全量步骤状态 |
-| `interview_ask` | 直接把当前这一问弹给你并等回答（选项渲染成按钮） | `answer` |
+| `interview_ask` | 弹这一问给你：**正文与选项由插件按 `step` 渲染**，模型只传短标识 | `question`、`options[].value`、`answer`、`argChars` |
 
 七个工具的 `parameters` 都是标准 JSON Schema，返回值都是 JSON，`output.render` 给出一行中文摘要。
+
+---
+
+## v0.3：提问正文不再由模型手写
+
+工具参数是流式拼出来的，**模型每写一段长自由文本，就多一次拼出非法 JSON 的机会**；
+`MALFORMED_RESPONSE` 会让整轮作废（用户看到的就是"说到一半突然停住"，还得自己补一句"继续"）。
+2026-11-11 那晚 14 次提问调用失败了 3 次，全部发生在"模型正在把 400–900 字的中文正文写进 `interview_ask`"这一刻。
+
+所以插件把提问稿收回自己手里：`engine.js` 的每个节点带一份给用户看的 `prompt`（`lead` + `ask`），
+S1.2 带五项资源清单、S1.1 / S1.3 带现成选项、S1.7 的草稿由插件编号。模型只需要：
+
+```
+interview_ask { step: "S1.3" }                                  → 正文 + 四个形态选项（带 value）
+interview_ask { step: "S1.2", variant: "checklist" }             → 正文 + 五项清单与默认值
+interview_ask { step: "S1.7", drafts: [{ text: "…" }, { text: "…" }] }  → 正文 + 编号草稿
+```
+
+于是**模型侧参数从 481–904 字符降到 15–104 字符**（最大值出现在 S1.7 带两条草稿时），
+长正文（S1.2 清单 237 字）变成插件产出的字符串，不再经过模型的手。
+
+剩下的自由文本还有闸门（`guardAskArgs`）：`question` ≤120 字且单行、`options` ≤4 个、`drafts` ≤6 条（每条 ≤90 字单行）。
+超限不会作废整轮——工具返回一条可读 error，模型当轮就能改用 `step` / `drafts` 重来。
 
 ---
 
@@ -220,13 +243,14 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 插件本体**零依赖**，不需要 `npm install`，裸 Node 直接跑：
 
 ```bash
-node packages/dsh-vibe-coding-prd/test/engine.test.mjs   # 引擎层 36 项
-node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 28 项
+node packages/dsh-vibe-coding-prd/test/engine.test.mjs   # 引擎层 47 项
+node packages/dsh-vibe-coding-prd/test/tools.test.mjs    # 工具层 34 项
 ```
 
 工具层测试用一个假 ctx 收集注册的工具，然后照真实调用顺序把整场访谈点一遍，
 覆盖这些只有真跑才看得见的约束：**退出条件不满足必须停在本步**、**必填步骤不能跳**、
-**出口门没过不许写文件**、**目录不可信时不执行**、**分批提交每批都落盘**。
+**出口门没过不许写文件**、**目录不可信时不执行**、**分批提交每批都落盘**、
+**提问正文由插件渲染且参数不超过 400 字符**。
 
 
 ---

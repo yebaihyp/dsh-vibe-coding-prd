@@ -3,6 +3,48 @@
 本文件记录所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-12
+
+按《会话中断分析报告》（2026-11-11，会话 `session-c02cdd4f`）做的 v0.3：**把提问正文赶出工具参数**。
+那晚 14 次提问调用失败 3 次（约 21%），全部是 `MALFORMED_RESPONSE` / `DeepSeek Messages stream: tool input is invalid JSON`，
+且都发生在模型把 400–900 字中文正文逐字写进 `interview_ask` 参数的那一刻。参数在进入 `execute()` 之前就被判死，
+所以插件侧唯一有效的对策是不让长自由文本进参数——这正是本次改动。报告 §7 的宿主兜底（`retryPolicy` 重试）不属于本插件范围。
+
+### 新增
+
+- **提问稿进引擎**：每个节点新增面向用户的 `prompt`（`lead` + `ask`），与原有的 `ask`（给模型的行为指令）分开。
+  - S1.2 新增 `checklist`：五项资源清单 + 每项的默认值，由插件摊开；
+  - S1.1 新增 `optionSet: 'mode'`（轻 / 重两档，含适用条件），S1.3 复用 `optionSet: 'form'`（四种形态 + 代价）。
+- **`interview_ask` 收窄成短参数**：新增 `step` / `variant`（`default` / `checklist` / `drafts` / `confirm`）/ `drafts`；
+  正文、编号、选项由 `renderAskPrompt()` 拼，模型只传短标识。S1.7 的草稿只给 `[{ text }]`，每条一句、单行、≤90 字。
+- 返回值新增 `options[].value`（S1.1 → `light` / `heavy`，S1.3 → `form` 的枚举值），用户点选的 label 可以精确映射回字段值。
+- `guardAskArgs()` 参数闸门：`question` ≤120 字且不许换行；`options` ≤4 个、label ≤24 字、description ≤40 字单行；
+  `drafts` ≤6 条、每条 ≤90 字单行；`step` 必须是 S1.0–S1.9。超限返回可读 error 并提示改用 `step` / `drafts`
+  （这类调用能执行，所以还来得及让模型当轮改，不会作废整轮）。
+- 模板与草稿的空白规整：换行统一、行尾空白清掉、连续空行压成一个（报告 P1）。
+
+### 变更
+
+- `interview_ask` 不再要求 `question`：不传 `step` 时读账本定位当前步骤；读不到又没给 `question` 才报错。
+- 旧调用方式（`question` + `options`）继续可用，作为"逃生阀"，但受上面的长度上限约束。
+- `interview_next` 新增 `askHint`（`{ step, variant }` + 一句话说明），`nextAction` 直接给出 `interview_ask` 的参数；
+  技能文档改写"怎么提问"一节，明确禁止手写长正文。
+- 插件身份统一为 `dsh-vibe-coding-prd`：`index.js` 的 `name` 与 `cordis.patch.yml` 的 `id` 从 `vibe-coding-prd` 改过来。
+
+### 修复
+
+- 提问路径不再产生"模型手写的长 JSON 字符串"：一次完整访谈里，`interview_ask` 的**模型侧参数**从 481–904 字符
+  降到 15–104 字符（最大值出现在 S1.7 带两条草稿时）；长正文（S1.2 清单 237 字、S1.3 选项说明等）由插件产出。
+- `interview_next` 在十步走完后会返回 `finished: true`（新增 `allStepsDone()`）。原先只看 `state.step`，
+  而 S1.9 既是最后一步又是兜底步骤，于是落盘后仍会一直报"当前 S1.9"，模型容易在"要不要生成文件"上反复弹同一问。
+
+### 自测
+
+- 引擎层 36 → **47 项**（节点 `prompt` 完备性、清单 / 选项 / 草稿渲染、`confirm` 措辞、空白规整、闸门边界、
+  正文无占位、十步走完的完成判定）；
+- 工具层 28 → **34 项**（`step` 提问、选项 `value` 回填、超长 `question` / 换行 / 草稿超量的当轮报错、
+  整场访谈参数体积 ≤400 字符、落盘后 `interview_next` 报完成）。
+
 ## [0.2.0] - 2026-10-16
 
 按《会话中断分析报告》（2026-10-15，会话 `session-d6932cb0`）的插件侧建议做的一轮修复。
@@ -119,3 +161,4 @@
 
 [0.1.0]: https://github.com/OWNER/dsh-vibe-coding-prd/releases/tag/v0.1.0
 [0.2.0]: https://github.com/OWNER/dsh-vibe-coding-prd/releases/tag/v0.2
+[0.3.0]: https://github.com/OWNER/dsh-vibe-coding-prd/releases/tag/v0.3.0

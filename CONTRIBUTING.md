@@ -44,8 +44,8 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
 
 | 层 | 文件 | 覆盖什么 |
 |----|------|---------|
-| 引擎层 | `test/engine.test.mjs` | 纯逻辑：节点门控、字段校验、账本解析往返、出口门判定、文档渲染结构、形状归一化与自检边界 |
-| 工具层 | `test/tools.test.mjs` | 注册表契约、七个工具的真实调用顺序、状态续接、目录守卫、分步提交、提问通道透传 |
+| 引擎层 | `test/engine.test.mjs` | 纯逻辑：节点门控、字段校验、账本解析往返、出口门判定、文档渲染结构、形状归一化、自检边界、提问稿渲染与参数闸门 |
+| 工具层 | `test/tools.test.mjs` | 注册表契约、七个工具的真实调用顺序、状态续接、目录守卫、分步提交、按 step 提问、提问通道透传 |
 
 工具层测试用一个假 ctx（`{ tools, userQuestions, skills }`）收集注册结果，
 所以**不需要真的起一个 Harness** 就能跑完整场访谈。新增工具时记得补注册表契约自检的覆盖。
@@ -57,6 +57,10 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
 - 加/删/改步骤 → 改 `NODES`；同步检查 `LIGHT_GROUPS`（轻模式合并分组）是否还对得上。
 - 改某一步的字段 → 改该节点的 `fields`；字段名要与 `interview_advance` 的 `values` 键一致。
   字段形状（`itemShape`）决定 `normalizeValues()` 怎么归一化，加新形状时两处一起改。
+- 改**提问稿** → 改该节点的 `prompt`（`lead` + `ask`，给用户看的原话）、`askVariant`、
+  `checklist`，以及在 `OPTION_SETS` 里加选项集。这三样都由 `renderAskPrompt()` 渲染，
+  **不要再把提问正文交回模型**：模型写长段 JSON 是整轮 `MALFORMED_RESPONSE` 的主因（报告 2026-11-11）。
+  新增节点时记得补 `prompt`——引擎层有一项自检会逼你补。
 - 改出口门 → 改 `exitGateChecks()`；同时更新 `packages/dsh-vibe-coding-prd/skills/vibe-coding-interview.md`
   和 README 里的出口门清单，三处必须一致。
   判定规则要收窄或放宽时改 `scanPlaceholders()` / `scanEnglish()`，并补对应边界用例
@@ -65,7 +69,7 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
   它们决定了产物长什么样，改完记得同步 README 里的产出文件表。
   渲染数组元素一律走 `itemText()` / `pairText()`，不要直接 `String(item)`。
 
-## 三条不能破的不变式
+## 四条不能破的不变式
 
 改代码时如果发现要违反其中一条，先停下来想清楚，并在 PR 里说明理由：
 
@@ -76,6 +80,9 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
    不续接、不写文件。这条防的是"拿 A 项目的进度续 B 项目"。
 3. **答案先落盘，再谈过门。** `interview_advance` 每收到一批就写盘，退出条件不满足也不回退答案；
    单次提交体积超限只给提醒，绝不拒收——宁可多几次调用，也不能丢用户已经说过的话。
+4. **长正文不进工具参数。** 提问稿、清单、选项文案、草稿编号都由插件产出（`renderAskPrompt()`），
+   模型只传 `step` / `variant` / 短草稿；`question` 只剩 ≤120 字单行的逃生阀。
+   模型逐字重写长 JSON 是整轮被中止的成因（报告 2026-11-11：14 次提问坏 3 次）。
 
 ## 提交规范
 

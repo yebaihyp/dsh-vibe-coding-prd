@@ -23,6 +23,11 @@ export const NODES = [
     defaultMode: 'light',
     auto: true,
     header: '破冰',
+    // 给用户看的稿子（v0.3，报告 P0）：由插件渲染进 interview_ask，不经过模型的手
+    prompt: {
+      lead: '先从最粗的地方开始：你想做个什么，谁会用它。这两件事说不清，后面的选择都会跑偏。',
+      ask: '用一句话说说你想做的东西，以及主要是谁在用？'
+    },
     ask: '用两句话回应用户：先复述你理解的"他想做个什么"，再确认"谁会用"。别展开成方案，别急着问细节。',
     guidance: [
       '只问两件事：一句话描述 + 谁会用它。',
@@ -42,6 +47,11 @@ export const NODES = [
     required: true,
     defaultMode: 'light',
     header: '选择访谈深度',
+    prompt: {
+      lead: '接下来问多深，取决于这东西出错时要付出多少代价。两种都能走完全程，选错了随时可以改。',
+      ask: '这个项目，我们按哪种方式问？'
+    },
+    optionSet: 'mode',
     ask: '把"轻模式"和"重模式"用大白话讲给用户听，给出你的推荐，让他点头或改。',
     guidance: [
       '判断标准：自己用 / 一次性 / 跑 demo → 轻；给别人用 / 长期跑 / 涉及钱或别人数据 / 出错有代价 → 重。',
@@ -65,6 +75,20 @@ export const NODES = [
     required: true,
     defaultMode: 'light',
     header: '现有资源清单',
+    prompt: {
+      lead:
+        '接下来盘家底。下面五项是后面砍方案、定技术栈的硬约束，填得越实，选型越不脱离现实。\n' +
+        '拿不准的项直接说"不确定"，我按常见情况给你记个默认值。',
+      ask: '这五项里，有哪几项跟你的实际情况不一样？'
+    },
+    askVariant: 'checklist',
+    checklist: [
+      { label: '机器与运行环境', fallback: '先按"只有自己这台电脑、不长期开机"记' },
+      { label: '自身能力与投入', fallback: '先按"不太会写代码、靠 AI，愿意长期维护"记' },
+      { label: '已有的账号与密钥', fallback: '先按"没有现成后端、没有域名"记' },
+      { label: '预算', fallback: '先按"一次性几十块、每月尽量零开销"记' },
+      { label: '数据', fallback: '先按"只存本地文件、不碰别人的隐私数据"记' }
+    ],
     ask: '把资源清单整张发给用户，让他勾选或口头回答，允许"不确定"。收到后先复述一遍你的理解再往下走。',
     guidance: [
       '清单一次发完，不要零散地问。',
@@ -96,6 +120,13 @@ export const NODES = [
     required: true,
     defaultMode: 'light',
     header: '它活在哪',
+    prompt: {
+      lead:
+        '形态是这一步最关键的一票：形态没定，后面的需求会越问越飘。\n' +
+        '资源清单已经帮你砍掉一半选项了——没有服务器、也不想买服务器，"要常开一台机器"那条就可以直接排除。',
+      ask: '这个产品，你想让它活在哪？'
+    },
+    optionSet: 'form',
     ask: '拿资源清单来定形态。给选项 + 推荐 + 代价，让用户拍板；别问他编程语言。',
     guidance: [
       '这是最关键的一步：一步没定，不准进 S1.4。',
@@ -122,6 +153,12 @@ export const NODES = [
     required: true,
     defaultMode: 'heavy',
     header: '把需求问全',
+    prompt: {
+      lead:
+        '接下来把"想要什么"问全。顺序是场景 → 目标 → 约束；然后拿数据走一遍链路：数据从哪来 → 怎么处理 → 到哪去。\n' +
+        '每一段都可能断 / 多 / 假 / 错 / 慢 / 挂 / 丢 / 漏，遇到一个就问一句"那这种情况你希望它怎么办"。',
+      ask: '先说场景：谁、在什么情况下、多久会用一次？'
+    },
     ask: '先按四要素问清"想要什么"，再用数据旅程扫一遍他没想到的情况；每发现一个缺口，追问"那这种情况你希望它怎么办"。',
     guidance: [
       '四要素：场景、目标、约束（验收标准在第 S1.7 步单独问，这里不用管）。',
@@ -153,6 +190,10 @@ export const NODES = [
     required: false,
     defaultMode: 'heavy',
     header: '页面与去向',
+    prompt: {
+      lead: '有界面的产品，再确认一件事：页面上每个能点的地方，点完要去哪。死胡同是小产品最常见的漏点。',
+      ask: '从用户进来开始：他点的第一个地方是什么，点完去哪？'
+    },
     ask: '若是有界面的产品：从"关键用户任务"出发问页面和导航，然后逐个确认"每个能点的地方点完去哪"。',
     guidance: [
       '盯死一条：有没有死胡同——任何可点的元素都必须有明确去向。',
@@ -177,6 +218,10 @@ export const NODES = [
     required: true,
     defaultMode: 'heavy',
     header: '边界与禁区',
+    prompt: {
+      lead: '"明确不做"这句话，是防跑偏最有效的一句。再加一条：对外不能说什么。',
+      ask: '这一版，你明确不做的是什么？'
+    },
     ask: '问清"它明确不做什么"，以及有没有合规/内容红线、有没有"内部实现别漏成卖点"的东西。',
     guidance: [
       '"明确不做"至少 1 条，这是防 AI 跑偏最有效的一句话。',
@@ -212,6 +257,11 @@ export const NODES = [
     required: true,
     defaultMode: 'heavy',
     header: '怎么算做完了',
+    prompt: {
+      lead: '最后把"怎么算做完了"说成能亲眼验的事实。这一步别看不上：写成"系统正常"就等于没写。',
+      ask: '这些验收和 MVP 条目，哪些要改、要删、要补？'
+    },
+    askVariant: 'drafts',
     ask: '逐条问"怎么算这一版做完了"，把答案逼成可二元判断的事实；然后定 MVP 完成线。',
     guidance: [
       '验收标准优先用 EARS 格式：当【前置条件】，在【动作】时，则【可观察的结果】。',
@@ -246,6 +296,10 @@ export const NODES = [
     required: false,
     defaultMode: 'light',
     header: '技术取向',
+    prompt: {
+      lead: '技术跟着资源清单走，不跟着潮流走。这里只给最省心的取向，代价也一并说清。',
+      ask: '按你现在这套资源，我推荐最简的那条路——你同意，还是想换？'
+    },
     ask: '拿 S1.2 的资源清单逐项对照着推技术取向，给出"推荐 + 代价 + 可否决"，让用户点头。',
     guidance: [
       '铁律：别一上来就推"后端 + 数据库 + Python"，那是 AI 训练数据里最常见的样子，不一定适合用户。',
@@ -267,6 +321,11 @@ export const NODES = [
     required: true,
     defaultMode: 'light',
     header: '落盘并给出下一步',
+    prompt: {
+      lead:
+        '十步问完了。接下来落盘两份文件：prd.md（给人看、也给 AI 照着开工）和 项目说明书（每次开新对话先贴给 AI 的那份活记忆）。',
+      ask: '现在就生成这两份文件？产品名叫什么？'
+    },
     ask: '调用 interview_finalize 产出两份文档，然后提议生成可点击的 HTML 原型。',
     guidance: [
       '落盘前先自查：全文无 {占位符}、无英文正文、无密钥。',
@@ -286,6 +345,29 @@ export const LIGHT_GROUPS = [
 ];
 
 export const FORM_OPTIONS = NODES.find((node) => node.id === 'S1.3').options;
+
+/** S1.1 的轻 / 重两档：文案由插件写，模型不用复述 */
+export const MODE_OPTIONS = [
+  {
+    value: 'light',
+    label: '轻问快走：几个问题一组',
+    description: '自己用、一次性、先跑个 demo：少停几次，只问关键的那几条。'
+  },
+  {
+    value: 'heavy',
+    label: '逐步深挖：一步一轮',
+    description: '要给别人用、涉及钱或别人的数据、出错有代价：一步一停，把边界和验收问透。'
+  }
+];
+
+/**
+ * optionSet → 渲染成按钮的选项集（v0.3，报告 P0）。
+ * 步骤定义里写 optionSet: 'form'，插件就把这几个选项直接摆给用户——模型一个字都不用写。
+ */
+export const OPTION_SETS = {
+  form: FORM_OPTIONS.map((option) => ({ value: option.value, label: option.label, description: option.cost })),
+  mode: MODE_OPTIONS
+};
 
 const FORM_LABELS = {
   'static-web': '纯前端网页（无后端、无服务器）',
@@ -746,6 +828,16 @@ export function missingRequired(state) {
   return NODES.filter((node) => node.required && !isStepDone(state, node.id));
 }
 
+/**
+ * 十步是否全部走完（完成或跳过）。
+ *
+ * v0.3 起 interview_next 用它判断"可以落盘了"：S1.9 既是最后一步又是兜底步骤，
+ * 只看 state.step 会永远停在 S1.9，模型会在"要不要生成文件"这一问上反复弹。
+ */
+export function allStepsDone(state) {
+  return NODES.every((node) => isStepDone(state, node.id));
+}
+
 // ---------------------------------------------------------------------------
 // 分步提交（v0.2，报告 2.8-B）
 //
@@ -819,6 +911,161 @@ export function planSubmission(node, outstanding) {
     limits: { ...SUBMIT_LIMITS },
     batches: batches.map((batch, index) => ({ call: index + 1, fields: batch.fields, estimateChars: batch.estimateChars })),
     tip: '每次 interview_advance 只交一批（≤ 3 个字段、≤ 1200 字符），数组字段一次交 1-3 条；每交一批都已落盘，中途断了也不会丢。'
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 提问渲染与闸门（v0.3，报告 P0）
+//
+// 三次会话中断（2026-11-11）全部发生在 interview_ask：模型把 400-900 字的中文正文
+// 逐字写进工具参数，拼出非法 JSON，harness 判 MALFORMED_RESPONSE 直接作废整轮。
+// 插件本来就有一份提问稿（每个节点的 prompt / optionSet / checklist），
+// 所以改成：模型只传 step（+ 可选的 variant / drafts 短句），正文由插件拼。
+//
+// 注意：这里的闸门拦不住"坏 JSON"（参数在进入 execute 之前就已经被判死），
+// 它拦的是"合法但把话说太长"的调用——让模型当轮改成短参数重来。
+// ---------------------------------------------------------------------------
+
+/** 提问参数的上限：超了返回可读错误，让模型改用 step/drafts */
+export const ASK_LIMITS = {
+  questionChars: 120,
+  maxOptions: 4,
+  optionLabelChars: 24,
+  optionDescChars: 40,
+  maxDrafts: 6,
+  draftChars: 90
+};
+
+/** 四种提问形态 */
+export const ASK_VARIANTS = ['default', 'checklist', 'drafts', 'confirm'];
+
+/** 空白规整：模板与草稿都可能带进异常空白（报告 P1） */
+function squeeze(text) {
+  return String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+/** 草稿条目：模型只给短句，编号与排版由插件做 */
+function normalizeDrafts(drafts) {
+  if (!Array.isArray(drafts)) return [];
+  return drafts
+    .map((draft) => (draft && typeof draft === 'object' ? draft.text : draft))
+    .map((text) => squeeze(text).replace(/\n+/g, ' '))
+    .filter(Boolean)
+    .slice(0, ASK_LIMITS.maxDrafts);
+}
+
+/** 这一步推荐用哪种提问形态 */
+function resolveVariant(node, args, drafts) {
+  if (ASK_VARIANTS.includes(args?.variant)) return args.variant;
+  if (drafts.length) return 'drafts';
+  return node?.askVariant || 'default';
+}
+
+/** 选项：模型给了就用模型的，否则用这一步自带的选项集 */
+function resolveOptions(node, args) {
+  if (Array.isArray(args?.options) && args.options.length) {
+    return args.options.map((option) => ({
+      label: squeeze(option?.label),
+      ...(option?.description ? { description: squeeze(option.description) } : {})
+    }));
+  }
+  const set = node?.optionSet ? OPTION_SETS[node.optionSet] : null;
+  if (!set) return [];
+  return set.map((option) => ({
+    value: option.value,
+    label: option.label,
+    ...(option.description ? { description: option.description } : {})
+  }));
+}
+
+/**
+ * 执行前的闸门：返回一句可读错误，没问题返回 null。
+ * 拦的是"合法但太长/太碎"的调用——这类调用能执行，所以还来得及让模型当轮改。
+ */
+export function guardAskArgs(args = {}) {
+  const question = typeof args.question === 'string' ? args.question : '';
+  if (question.length > ASK_LIMITS.questionChars) {
+    return `question 有 ${question.length} 字，超过 ${ASK_LIMITS.questionChars} 字上限：正文交给插件渲染——传 step（和需要时的 variant / drafts），question 只留一句补充。`;
+  }
+  if (/[\r\n]/.test(question)) {
+    return 'question 里不许出现换行：要分点请用 drafts 数组，每条压成一句单行话。';
+  }
+  if (args.step !== undefined && !nodeById(String(args.step).trim().toUpperCase())) {
+    return `未知步骤 ${args.step}：可用 ${NODES.map((node) => node.id).join('、')}。`;
+  }
+
+  const options = Array.isArray(args.options) ? args.options : [];
+  if (options.length > ASK_LIMITS.maxOptions) {
+    return `options 最多 ${ASK_LIMITS.maxOptions} 个，现在 ${options.length} 个：去掉次要项，或不传 options 改用这一步自带的选项。`;
+  }
+  for (const [index, option] of options.entries()) {
+    const label = String(option?.label ?? '').trim();
+    if (!label) return `options 第 ${index + 1} 个缺 label。`;
+    if (label.length > ASK_LIMITS.optionLabelChars) {
+      return `options 第 ${index + 1} 个 label 有 ${label.length} 字，超过 ${ASK_LIMITS.optionLabelChars} 字上限。`;
+    }
+    const description = String(option?.description ?? '');
+    if (description.length > ASK_LIMITS.optionDescChars) {
+      return `options 第 ${index + 1} 个 description 有 ${description.length} 字，超过 ${ASK_LIMITS.optionDescChars} 字上限。`;
+    }
+    if (/[\r\n]/.test(description)) return `options 第 ${index + 1} 个 description 不许换行。`;
+  }
+
+  const drafts = Array.isArray(args.drafts) ? args.drafts : [];
+  if (drafts.length > ASK_LIMITS.maxDrafts) {
+    return `drafts 最多 ${ASK_LIMITS.maxDrafts} 条，现在 ${drafts.length} 条：分成两次问，每次只放 3-4 条。`;
+  }
+  for (const [index, draft] of drafts.entries()) {
+    const text = String((draft && typeof draft === 'object' ? draft.text : draft) ?? '');
+    if (!text.trim()) return `drafts 第 ${index + 1} 条是空的。`;
+    if (/[\r\n]/.test(text)) return `drafts 第 ${index + 1} 条含换行：每条压成一句单行话。`;
+    if (text.length > ASK_LIMITS.draftChars) {
+      return `drafts 第 ${index + 1} 条有 ${text.length} 字，超过 ${ASK_LIMITS.draftChars} 字上限：砍成一句能验证的话，或分两次问。`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 把「节点模板 + 短草稿」拼成要弹给用户的那一问（报告 5.3）。
+ * 返回的 question 只用于展示：它由插件产出，永远不经过模型的手，所以可以放心写长。
+ */
+export function renderAskPrompt(node, args = {}) {
+  const drafts = normalizeDrafts(args.drafts);
+  const variant = resolveVariant(node, args, drafts);
+  const prompt = node?.prompt || {};
+  const blocks = [];
+
+  if (prompt.lead) blocks.push(squeeze(prompt.lead));
+
+  if (variant === 'checklist') {
+    const items = Array.isArray(node?.checklist) ? node.checklist : [];
+    if (items.length) blocks.push(items.map((item, index) => `${index + 1}）${item.label}：${item.fallback}`).join('\n'));
+  }
+
+  if (variant === 'drafts' || variant === 'confirm') {
+    if (drafts.length) blocks.push(drafts.map((draft, index) => `${index + 1}. ${draft}`).join('\n'));
+    if (variant === 'confirm') blocks.push('上面哪条不对，直接说第几条要改成什么。');
+  }
+
+  const extra = squeeze(args.question);
+  if (extra) blocks.push(extra);
+  blocks.push(squeeze(prompt.ask || node?.header || ''));
+
+  const question = squeeze(blocks.filter(Boolean).join('\n\n'));
+  return {
+    step: node?.id || null,
+    stepName: node?.name || null,
+    variant,
+    header: squeeze(args.header || node?.header || ''),
+    question,
+    options: resolveOptions(node, args),
+    chars: question.length
   };
 }
 

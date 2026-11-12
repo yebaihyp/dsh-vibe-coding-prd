@@ -15,13 +15,16 @@ import {
   SUBMIT_LIMITS,
   checkAcceptance,
   createState,
+  allStepsDone,
   exitGateChecks,
+  guardAskArgs,
   measureSubmission,
   missingRequired,
   normalizeValues,
   outstandingFields,
   parseLedger,
   planSubmission,
+  renderAskPrompt,
   renderLedger,
   renderPrd,
   renderSpec,
@@ -340,6 +343,92 @@ check('账本往返带上阶段备注与阶段状态', () => {
   assert.equal(restored.stage, 'S2');
   assert.equal(restored.notes, 'S1 出口门已过，可进入 S2 架构选型');
   assert.equal(restored.projectName, '竞品调研助手');
+});
+
+console.log('\n[6] v0.3：提问稿由插件渲染，自由文本上闸（报告 P0 / P1）');
+check('每个节点都带面向用户的 prompt', () => {
+  for (const node of NODES) {
+    assert.ok(node.prompt && node.prompt.lead && node.prompt.ask, `${node.id} 缺 prompt.lead / prompt.ask`);
+  }
+});
+check('S1.2 checklist 渲染出五项清单与默认值', () => {
+  const rendered = renderAskPrompt(nodeById('S1.2'), {});
+  assert.equal(rendered.variant, 'checklist');
+  assert.equal(rendered.header, '现有资源清单');
+  assert.match(rendered.question, /1）机器与运行环境：先按/);
+  assert.match(rendered.question, /5）数据：先按/);
+  assert.deepEqual(rendered.options, []);
+  assert.ok(rendered.chars > 150, '正文应当由插件写足');
+});
+check('S1.3 自带四种形态选项，带 value 便于回填', () => {
+  const rendered = renderAskPrompt(nodeById('S1.3'), {});
+  assert.deepEqual(rendered.options.map((option) => option.value), ['static-web', 'server-app', 'local-script', 'no-code']);
+  assert.match(rendered.options[0].description, /静态托管/);
+  assert.match(rendered.question, /你想让它活在哪/);
+});
+check('S1.1 的轻 / 重选项由插件给', () => {
+  const rendered = renderAskPrompt(nodeById('S1.1'), {});
+  assert.deepEqual(rendered.options.map((option) => option.value), ['light', 'heavy']);
+  assert.match(rendered.question, /按哪种方式问/);
+});
+check('drafts 编号由插件排，短句不用自己编号', () => {
+  const rendered = renderAskPrompt(nodeById('S1.7'), { drafts: [{ text: '第一条验收' }, { text: '第二条验收' }] });
+  assert.equal(rendered.variant, 'drafts');
+  assert.match(rendered.question, /1\. 第一条验收\n2\. 第二条验收/);
+});
+check('confirm 形态多一句确认话术', () => {
+  const rendered = renderAskPrompt(nodeById('S1.7'), { variant: 'confirm', drafts: ['只有这条'] });
+  assert.equal(rendered.variant, 'confirm');
+  assert.match(rendered.question, /第几条要改成什么/);
+});
+check('模板与补充里的异常空白会被规整', () => {
+  const rendered = renderAskPrompt(nodeById('S1.0'), { question: '  一句话  补充  ' });
+  assert.match(rendered.question, /一句话 补充/);
+  assert.doesNotMatch(rendered.question, /\n{3,}/);
+  assert.equal(rendered.question, rendered.question.trim());
+});
+check('闸门：长度 / 换行 / 选项数 / 选项字数 / 草稿 / 未知步骤', () => {
+  assert.match(guardAskArgs({ question: '长'.repeat(121) }), /120 字上限/);
+  assert.match(guardAskArgs({ question: '两行\n文字' }), /不许出现换行/);
+  assert.match(guardAskArgs({ options: new Array(5).fill({ label: '项' }) }), /最多 4 个/);
+  assert.match(guardAskArgs({ options: [{ label: '标'.repeat(25) }] }), /label/);
+  assert.match(guardAskArgs({ options: [{ label: 'ok', description: '说'.repeat(41) }] }), /description/);
+  assert.match(guardAskArgs({ drafts: new Array(7).fill({ text: '一句' }) }), /最多 6 条/);
+  assert.match(guardAskArgs({ drafts: [{ text: '长'.repeat(91) }] }), /90 字上限/);
+  assert.match(guardAskArgs({ drafts: [{ text: '两行\n草稿' }] }), /含换行/);
+  assert.match(guardAskArgs({ step: 'S9.9' }), /未知步骤/);
+  assert.equal(guardAskArgs({ step: 'S1.7', drafts: [{ text: '一句能验的话' }] }), null);
+  assert.equal(guardAskArgs({ question: '它活在哪？' }), null);
+});
+check('渲染出的正文没有未替换的占位与标签', () => {
+  for (const node of NODES) {
+    const rendered = renderAskPrompt(node, {});
+    assert.ok(rendered.question.length >= 4, `${node.id} 正文为空`);
+    assert.doesNotMatch(rendered.question, /\{[^}\n]{1,40}\}/, `${node.id} 正文里有花括号占位`);
+    assert.doesNotMatch(rendered.question, /<\/?[a-zA-Z][^>\n]*>/, `${node.id} 正文里有标签`);
+    assert.doesNotMatch(rendered.question, /TODO|TBD/, `${node.id} 正文里有 TODO/TBD`);
+  }
+});
+check('常见提问的参数体积远小于 400 字符', () => {
+  const sizes = [
+    { step: 'S1.0' },
+    { step: 'S1.1' },
+    { step: 'S1.2' },
+    { step: 'S1.3' },
+    { step: 'S1.7', drafts: [{ text: '当我填入 5 个链接并点击生成，则 60 秒内出现含四列的对比表' }] }
+  ].map((args) => JSON.stringify(args).length);
+  assert.ok(Math.max(...sizes) < 120, `最大 ${Math.max(...sizes)} 字符`);
+});
+check('十步走完时 allStepsDone 为真（否则 next 会永远停在 S1.9）', () => {
+  const running = runInterview({ 'S1.5': null, 'S1.8': null });
+  assert.equal(allStepsDone(running), false, '可选步骤还没处理，不算走完');
+  const finished = skipStep(
+    skipStep(runInterview({ 'S1.5': null, 'S1.8': null }), 'S1.5', '纯脚本，无界面', {}),
+    'S1.8',
+    '不折腾额外技术栈',
+    {}
+  );
+  assert.equal(allStepsDone(finished), true);
 });
 
 console.log(`\n结果：${passed} 项通过，${failures.length} 项失败`);

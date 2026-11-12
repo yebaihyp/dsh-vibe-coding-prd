@@ -24,6 +24,11 @@
  *   3. 形状归一化（P5）：{item:"…"} 与字符串都认，写入状态前统一成规范形状；
  *   4. 自检收窄（P6）：URL/路由里的尖括号、三段式英文品牌名不再被误判。
  *
+ * v0.3 按《会话中断分析报告》（2026-11-11）把"提问正文"赶出工具参数（报告 P0）：
+ *   - engine.js 每个节点带一份给用户看的 prompt（lead + ask）、可选的 optionSet / checklist；
+ *   - interview_ask 只收短标识（step / variant / drafts 短句），正文与选项由插件渲染；
+ *   - 残留的自由文本（question / options / drafts）有了长度与换行上限，超限当轮返回可读错误。
+ *
  * 设计取舍见 README.md。
  */
 import { readFileSync } from 'node:fs';
@@ -34,6 +39,8 @@ import {
   NODES,
   LIGHT_GROUPS,
   FORM_OPTIONS,
+  MODE_OPTIONS,
+  ASK_VARIANTS,
   SUBMIT_LIMITS,
   applyAnswer,
   baselineDescription,
@@ -41,14 +48,17 @@ import {
   createState,
   englishAllowlist,
   exitGateChecks,
+  guardAskArgs,
   itemText,
   measureSubmission,
   missingRequired,
+  allStepsDone,
   nodeById,
   normalizeValues,
   outstandingFields,
   parseLedger,
   planSubmission,
+  renderAskPrompt,
   renderDevDoc,
   renderLedger,
   renderPrd,
@@ -59,8 +69,8 @@ import {
   validateAnswer
 } from './engine.js';
 
-/** 插件名，用作账本里的路径提示 */
-const name = 'vibe-coding-prd';
+/** 插件名：与 package.json 的 name、cordis.patch.yml 的 id 保持一致 */
+const name = 'dsh-vibe-coding-prd';
 
 /** 需要 Host 提供的服务：工具注册表 + 向用户提问的能力 + 技能目录 */
 const inject = ['tools', 'userQuestions', 'skills'];
@@ -267,6 +277,11 @@ function brief(state, node) {
     canSkip: canSkip(node),
     header: node.header,
     ask: node.ask,
+    // 提问怎么走：正文与选项由插件渲染，模型只传短标识（报告 P0）
+    askHint: {
+      args: { step: node.id, ...(node.askVariant ? { variant: node.askVariant } : {}) },
+      note: '调用 interview_ask 时只传这个 args：正文和选项由插件渲染（清单 / 形态选项 / 草稿编号都是现成的）。不要自己抄长段提问稿。'
+    },
     guidance: node.guidance,
     fields: node.fields.map((field) => ({
       key: field.key,
@@ -291,6 +306,7 @@ function brief(state, node) {
       : {}),
     rules: [
       '一次只问一件事（或轻模式下这一组的事），像聊天，别像问卷。',
+      '提问走 interview_ask + step：正文由插件念稿、选项由插件渲染，不要自己写长段提问稿——模型逐字拼长 JSON 是整轮被中止的主要成因。',
       '岔路口给建议：给 2-3 个选项 + 推荐一个最简可行的 + 一句话讲清代价，等用户拍板，别把选择甩回去。',
       '能推断的别问：从用户已说的话或常识能推出来的，直接作为推荐默认值让他确认。',
       '先问问题再谈方案；先定约束再定形态，最后才碰技术。',
@@ -301,7 +317,7 @@ function brief(state, node) {
     nextAction:
       node.id === 'S1.9'
         ? '先调用 interview_advance 记下产品名称，再调用 interview_finalize 落盘两份文档。'
-        : '把上面这一问发给用户（可以用 ask_user_question 让他点选），拿到答案后调用 interview_advance。'
+        : `调用 interview_ask（${JSON.stringify({ step: node.id, ...(node.askVariant ? { variant: node.askVariant } : {}) })}）把这一问弹给用户，拿到答案后调用 interview_advance。`
   };
 }
 
@@ -425,7 +441,7 @@ const apply = (ctx) => {
     tool({
       name: 'interview_start',
       description:
-        '开始或续接一次 vibe-coding-prd 需求访谈。它读 docs/进度账本.md 恢复进度（不存在就照模板创建），并把"当前走到哪一步、下一步做什么"报给你。' +
+        '开始或续接一次 dsh-vibe-coding-prd 需求访谈。它读 docs/进度账本.md 恢复进度（不存在就照模板创建），并把"当前走到哪一步、下一步做什么"报给你。' +
         '项目目录必须能确定：显式传 workspace，或者宿主提供了会话工作目录；两者都没有时它会拒绝执行，而不是回落到宿主进程的当前目录。' +
         '账本里记的工作目录与本次不一致时也会拒绝，只报告"发现历史账本在别处"——目录确实搬过家就传 adoptWorkspace=true 接管。' +
         '续接成功后会返回项目名与进度，先跟用户确认这是同一个项目再往下走。' +
@@ -527,8 +543,8 @@ const apply = (ctx) => {
       name: 'interview_next',
       description:
         '取出当前这一步的提问稿：要问什么、为什么这么问、给用户哪些选项、退出条件是什么、还缺哪些信息，' +
-        '外加 submissionPlan（分步提交计划：把这一步的字段切成小批，每次只交一批）。' +
-        '拿到后按 ask 字段把问题发给用户（可以用 interview_ask 直接弹给用户点选），拿到答案再调用 interview_advance 记录。',
+        '外加 askHint（怎么把这一问弹给用户）与 submissionPlan（分步提交计划：把这一步的字段切成小批，每次只交一批）。' +
+        '提问按 askHint.args 调用 interview_ask 即可——正文和选项由插件渲染，不要自己复述；拿到答案再调用 interview_advance 记录。',
       parameters: {
         workspace: { type: 'string', description: '项目目录的绝对路径；留空则用会话的工作目录' }
       },
@@ -543,6 +559,16 @@ const apply = (ctx) => {
         const state = await loadState(ws.dir);
         const conflict = workspaceConflict(state, ws.dir);
         if (conflict) return conflictPayload(conflict);
+        if (allStepsDone(state)) {
+          return {
+            ok: true,
+            finished: true,
+            workspace: slash(ws.dir),
+            message: state.stage === 'S2'
+              ? '十步访谈已完成、文档已落盘。可以跟用户过一遍产出，或提议做一个能点的 HTML 原型。'
+              : '十步访谈已全部走完。调用 interview_finalize 落盘并过出口门。'
+          };
+        }
         const node = nodeById(state.step);
         if (!node) {
           return { ok: true, finished: true, message: '十步访谈已全部走完。调用 interview_finalize 落盘并过出口门。' };
@@ -626,10 +652,12 @@ const apply = (ctx) => {
 
         const outstanding = outstandingFields(node, result.merged, result.issues);
         const plan = planSubmission(node, outstanding);
-        const nextNode = nodeById(nextState.step);
+        const finished = allStepsDone(nextState);
+        const nextNode = finished ? null : nodeById(nextState.step);
         const payload = {
           ok: true,
           advanced: result.advanced,
+          finished,
           step: node.id,
           stepName: node.name,
           saved: true,
@@ -863,7 +891,8 @@ const apply = (ctx) => {
           missingRequired: missingRequired(state).map((item) => `${item.id} ${item.name}`),
           collectable: {
             deferred: state.answers.deferred || [],
-            forms: FORM_OPTIONS
+            forms: FORM_OPTIONS,
+            modes: MODE_OPTIONS
           }
         };
       }
@@ -875,43 +904,123 @@ const apply = (ctx) => {
     tool({
       name: 'interview_ask',
       description:
-        '把当前这一步的问题直接弹给用户并等待他回答（走 Harness 的提问通道，答案会作为用户消息回到对话里）。' +
-        '比让模型自己复述问题更省事：选项会渲染成可点按钮。用户回答后再调用 interview_advance 记录。' +
-        '一次只弹一个问题；只有确实需要用户点选或填空时才用。',
+        '把这一步的问题弹给用户并等待回答（答案会作为用户消息回来）。' +
+        '正文与选项由插件按步骤渲染：传 step 就够，需要草稿时用 drafts 传短句。' +
+        '不要自己写提问稿——长自由文本是整轮被中止（MALFORMED_RESPONSE）的主因。' +
+        '一次只弹一个问题；拿到回答后调用 interview_advance 记录。',
       parameters: {
-        question: { type: 'string', required: true, description: '要问用户的问题，用大白话，别用内部术语' },
-        header: { type: 'string', description: '可选短标题，例如"它活在哪"' },
-        options: {
+        step: { type: 'string', description: '问哪一步（S1.0–S1.9）；留空读账本用当前步骤' },
+        variant: {
+          type: 'string',
+          enum: ASK_VARIANTS,
+          description: '提问形态：default 直问；checklist 带这一步的清单；drafts 把 drafts 编成编号列表；confirm 是"确认草稿"的措辞。留空按步骤自动选'
+        },
+        drafts: {
           type: 'array',
-          description: '可选选项；推荐项放第一个并在标签后加"（推荐）"',
+          description: '要让用户确认的草稿（每条一句、单行；编号与排版插件做）',
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              label: { type: 'string', description: '选项短标签' },
-              description: { type: 'string', description: '一句话说明代价或影响' }
+              id: { type: 'string', description: '可选标识，原样回显' },
+              text: { type: 'string', description: '一句单行话' }
+            },
+            required: ['text']
+          }
+        },
+        options: {
+          type: 'array',
+          description: '不传则用这一步自带的选项（S1.1 轻/重、S1.3 四种形态）；最多 4 个',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              label: { type: 'string', description: '选项短标签（≤24 字）' },
+              description: { type: 'string', description: '一句代价（≤40 字）' }
             },
             required: ['label']
           }
         },
-        multiSelect: { type: 'boolean', description: '是否允许多选，默认单选' }
+        question: {
+          type: 'string',
+          description: '[已废弃] 例外才用的补充：≤120 字、单行；超限会报错让你改用 step / drafts'
+        },
+        header: { type: 'string', description: '短标题；留空用这一步的标题' },
+        multiSelect: { type: 'boolean', description: '允许多选，默认单选' },
+        workspace: { type: 'string', description: '项目目录绝对路径；只在没传 step、要读账本定位当前步骤时用到' }
       },
-      summarize: (value) => `用户回答：${JSON.stringify(value.answer)}`,
+      summarize: (value) => {
+        if (value.rejected) return `未提问：${String(value.error ?? '').slice(0, 90)}`;
+        const where = value.step ? `${value.step}${value.stepName ? ` ${value.stepName}` : ''}｜` : '';
+        return `已提问（${where}${value.variant}）：用户回答 ${JSON.stringify(value.answer)}`;
+      },
       async execute(args, exec) {
+        const rejection = guardAskArgs(args);
+        if (rejection) {
+          return {
+            ok: false,
+            rejected: true,
+            error: rejection,
+            hint: '把正文交给插件：传 step（S1.2 加 variant=checklist，S1.7 用 drafts 短句），question 只留一句 ≤120 字的补充。'
+          };
+        }
+
+        let node = typeof args.step === 'string' && args.step.trim()
+          ? nodeById(args.step.trim().toUpperCase())
+          : null;
+        let workspace = null;
+        if (!node && !args.step) {
+          // 没指定步骤：读账本定位当前步骤；定位不到就退化成"纯 question"的旧用法
+          const ws = resolveWorkspace(args.workspace, exec);
+          if (ws.dir) {
+            workspace = slash(ws.dir);
+            node = nodeById((await loadState(ws.dir)).step);
+          }
+        }
+        if (!node && !(typeof args.question === 'string' && args.question.trim())) {
+          return {
+            ok: false,
+            rejected: true,
+            error: '没传 step，也读不到账本里的当前步骤：传 step（S1.0–S1.9），或先用 interview_start 打开项目。'
+          };
+        }
+
+        const rendered = renderAskPrompt(node, args);
         const answers = await askUser(ctx, exec, [
           {
             id: 'q1',
-            question: args.question,
-            ...(args.header !== undefined ? { header: args.header } : {}),
-            ...(Array.isArray(args.options) ? { options: args.options.map((option) => ({ ...option })) } : {}),
+            question: rendered.question,
+            ...(rendered.header ? { header: rendered.header } : {}),
+            ...(rendered.options.length
+              ? {
+                  options: rendered.options.map((option) => ({
+                    label: option.label,
+                    ...(option.description ? { description: option.description } : {})
+                  }))
+                }
+              : {}),
             ...(args.multiSelect !== undefined ? { multiSelect: args.multiSelect } : {})
           }
         ]);
         const answer = answers[0] || { selected: [] };
         return {
-          question: args.question,
+          ok: true,
+          step: rendered.step,
+          stepName: rendered.stepName,
+          variant: rendered.variant,
+          header: rendered.header,
+          question: rendered.question,
+          chars: rendered.chars,
+          argChars: JSON.stringify(args).length,
+          options: rendered.options.map((option) => ({
+            label: option.label,
+            ...(option.value !== undefined ? { value: option.value } : {})
+          })),
+          ...(workspace ? { workspace } : {}),
           answer,
-          hint: '拿到答案后调用 interview_advance，把答案填进当前步骤对应字段。'
+          hint: rendered.options.some((option) => option.value !== undefined)
+            ? '按 options 里的 value 把用户选中的 label 映射回字段值，再调用 interview_advance。'
+            : '拿到答案后调用 interview_advance，把答案填进当前步骤对应字段。'
         };
       }
     })

@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply } from '../index.js';
+import { NODES } from '../engine.js';
 
 let passed = 0;
 const failures = [];
@@ -143,6 +144,10 @@ await check('每个工具定义都符合宿主注册表的 schema 契约', () =>
     if ('type' in node) assert.ok(allowed.has(node.type), `${path}.type 非法：${JSON.stringify(node.type)}`);
     if (node.type === 'object') {
       assert.ok(typeof node.additionalProperties === 'boolean', `${path} 是 object，必须显式写 additionalProperties`);
+    }
+    if ('enum' in node) {
+      assert.ok(Array.isArray(node.enum) && node.enum.length > 0, `${path}.enum 必须是非空数组`);
+      for (const value of node.enum) assert.equal(typeof value, node.type, `${path}.enum 的值类型必须与 type 一致`);
     }
     for (const [key, value] of Object.entries(node)) walk(value, `${path}.${key}`);
   };
@@ -462,6 +467,70 @@ await check('三段式英文品牌名不再让出口门误判', async () => {
   assert.equal(passed.written, true, JSON.stringify(passed.blocking));
   assert.ok(passed.terms.includes('Land of Knowledge'));
   assert.ok(passed.terms.includes('Knowledge Graph Platform for Everyone Who Learns'));
+});
+
+console.log('\n[8] v0.3：提问正文由插件渲染（报告 P0）');
+await check('interview_ask({ step: "S1.2" }) 弹的是引擎里的五项清单', async () => {
+  const before = asked.length;
+  const result = await call(registry, 'interview_ask', { step: 'S1.2' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.variant, 'checklist');
+  assert.equal(asked.length, before + 1, '应当真的弹给用户');
+  const sent = asked.at(-1).questions[0];
+  assert.equal(sent.header, '现有资源清单');
+  for (const label of ['机器与运行环境', '自身能力与投入', '已有的账号与密钥', '预算', '数据']) {
+    assert.ok(sent.question.includes(label), `正文缺「${label}」：${sent.question}`);
+  }
+  assert.doesNotMatch(sent.question, /\{[^}\n]{1,40}\}|TODO|TBD|<\/?[a-zA-Z]/);
+  assert.ok(result.argChars <= 40, `模型参数只有 ${result.argChars} 字符`);
+});
+await check('interview_ask({ step: "S1.3" }) 的选项由插件给，并带 value 便于回填', async () => {
+  const result = await call(registry, 'interview_ask', { step: 'S1.3' });
+  assert.deepEqual(result.options.map((option) => option.value), ['static-web', 'server-app', 'local-script', 'no-code']);
+  assert.equal(asked.at(-1).questions[0].options.length, 4);
+  assert.ok(result.argChars <= 40, `模型参数只有 ${result.argChars} 字符`);
+});
+await check('question 超 120 字被拦下，提示改用 step（不弹给用户）', async () => {
+  const before = asked.length;
+  const result = await call(registry, 'interview_ask', { question: '长'.repeat(130) });
+  assert.equal(result.ok, false);
+  assert.equal(result.rejected, true);
+  assert.match(result.error, /120 字/);
+  assert.match(result.hint, /step/);
+  assert.equal(asked.length, before, '被拦下的调用不该真的弹给用户');
+});
+await check('question 带换行、drafts 超量都会在当轮报错', async () => {
+  const wrapped = await call(registry, 'interview_ask', { question: '第一行\n第二行' });
+  assert.equal(wrapped.rejected, true);
+  assert.match(wrapped.error, /换行/);
+  const many = await call(registry, 'interview_ask', { step: 'S1.7', drafts: new Array(7).fill({ text: '一句' }) });
+  assert.equal(many.rejected, true);
+  assert.match(many.error, /最多 6 条/);
+});
+await check('一次完整访谈里，每次 interview_ask 的参数都不超过 400 字符', async () => {
+  const sizes = [];
+  for (const node of NODES) {
+    const args = node.id === 'S1.7'
+      ? {
+          step: node.id,
+          drafts: [
+            { text: '当我填入 5 个链接并点击生成，则 60 秒内出现含四列的对比表' },
+            { text: '抓取失败时那一行标注未获取，整轮不中断' }
+          ]
+        }
+      : { step: node.id };
+    const result = await call(registry, 'interview_ask', args);
+    assert.equal(result.ok, true, `${node.id} 提问失败：${result.error}`);
+    assert.ok(result.chars >= 4, `${node.id} 渲染出的正文太短`);
+    sizes.push(result.argChars);
+  }
+  assert.ok(Math.max(...sizes) <= 400, `最大参数 ${Math.max(...sizes)} 字符`);
+});
+
+await check('落盘后 interview_next 会报"已完成"，不会在 S1.9 上打转', async () => {
+  const result = await call(registry, 'interview_next', { workspace: shapeDir });
+  assert.equal(result.finished, true);
+  assert.match(result.message, /已完成|落盘/);
 });
 
 await rm(guardRoot, { recursive: true, force: true });
