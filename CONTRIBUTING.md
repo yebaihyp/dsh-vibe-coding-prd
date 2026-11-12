@@ -69,7 +69,7 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
   它们决定了产物长什么样，改完记得同步 README 里的产出文件表。
   渲染数组元素一律走 `itemText()` / `pairText()`，不要直接 `String(item)`。
 
-## 四条不能破的不变式
+## 五条不能破的不变式
 
 改代码时如果发现要违反其中一条，先停下来想清楚，并在 PR 里说明理由：
 
@@ -83,6 +83,10 @@ node packages/dsh-vibe-coding-prd/test/tools.test.mjs
 4. **长正文不进工具参数。** 提问稿、清单、选项文案、草稿编号都由插件产出（`renderAskPrompt()`），
    模型只传 `step` / `variant` / 短草稿；`question` 只剩 ≤120 字单行的逃生阀。
    模型逐字重写长 JSON 是整轮被中止的成因（报告 2026-11-11：14 次提问坏 3 次）。
+5. **`output.render` 就是模型看到的全部内容。** DSH 把 `render` 的返回值直接当作工具消息，
+   它不是"只给用户看的摘要"。模型要用的字段必须出现在 `render` 里——本插件统一返回
+   "一行摘要 + 完整 JSON"两段；只写摘要会让模型靠猜（v0.1/v0.2 就传过 `values:{depth:"标准"}` 这种猜出来的字段名）。
+   改 `tool()` 或任何工具的 `summarize` 时别把 JSON 那段弄丢。
 
 ## 提交规范
 

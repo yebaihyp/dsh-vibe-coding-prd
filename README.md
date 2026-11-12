@@ -147,7 +147,9 @@ interview_finalize   出口门自检 → 全过 → 落盘 prd.md / 项目说明
 | `interview_status` | 只读查看进度、跳步留痕、阻塞项、目录归属异常 | 全量步骤状态 |
 | `interview_ask` | 弹这一问给你：**正文与选项由插件按 `step` 渲染**，模型只传短标识 | `question`、`options[].value`、`answer`、`argChars` |
 
-七个工具的 `parameters` 都是标准 JSON Schema，返回值都是 JSON，`output.render` 给出一行中文摘要。
+七个工具的 `parameters` 都是标准 JSON Schema，返回值都是 JSON，`output.render` 返回**「一行摘要 + 完整 JSON」**两段。
+DSH 把 `render` 的返回值直接当作工具消息——模型只看得见这里的内容，所以字段清单、`gaps`、`askHint`、`submissionPlan`
+都必须落在这段文本里（v0.1/v0.2 只给一行摘要，模型只能靠猜字段名）。
 
 ---
 

@@ -166,7 +166,25 @@ await check('每个工具定义都符合宿主注册表的 schema 契约', () =>
       throw new Error(`${toolName} 的摘要渲染抛错了：${error.message}`);
     }
     assert.ok(Array.isArray(summary) && typeof summary[0]?.text === 'string', `${toolName} 的摘要渲染不是文本块`);
+    // DSH 把 render 的返回值直接当作工具消息：模型只能看到这几段文本，
+    // 所以第二段必须是完整 JSON —— 否则 fields / gaps / askHint / options 全都进不了模型上下文。
+    assert.equal(summary.length, 2, `${toolName} 的 render 应当返回"摘要 + JSON"两段`);
+    const json = summary[1]?.text;
+    assert.ok(typeof json === 'string' && json.trim().startsWith('{'), `${toolName} 的第二段不是 JSON 文本`);
+    assert.doesNotThrow(() => JSON.parse(json), `${toolName} 的第二段必须是可解析的 JSON`);
   }
+});
+await check('模型能从 render 里拿到干活要用的字段', async () => {
+  const render = (name, value) => registry.get(name).output.render({}, value);
+  const next = render('interview_next', { ok: true, step: 'S1.0', stepName: '破冰', askHint: { args: { step: 'S1.0' } }, fields: [{ key: 'oneLiner' }] });
+  const nextJson = JSON.parse(next[1].text);
+  assert.deepEqual(nextJson.askHint.args, { step: 'S1.0' });
+  assert.equal(nextJson.fields[0].key, 'oneLiner');
+  const ask = render('interview_ask', { ok: true, options: [{ label: '纯前端网页', value: 'static-web' }], answer: { selected: ['纯前端网页'] } });
+  const askJson = JSON.parse(ask[1].text);
+  assert.equal(askJson.options[0].value, 'static-web');
+  const advance = render('interview_advance', { ok: true, advanced: false, gaps: [{ message: '缺「谁会用它」' }], submissionPlan: { batches: [] } });
+  assert.match(JSON.parse(advance[1].text).gaps[0].message, /谁会用它/);
 });
 await check('interview_start 会在工作目录建出账本', async () => {
   const result = await call(registry, 'interview_start', { workspace });

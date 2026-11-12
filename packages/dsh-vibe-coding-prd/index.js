@@ -338,8 +338,14 @@ function objectSchema(properties, required = []) {
 }
 
 /**
- * 工具定义：模型看到 JSON 结果，用户看到一行摘要。
- * 摘要只用于展示，可能在"回放"时拿到结构不完整的旧值，所以必须永不抛错。
+ * 工具定义：一行摘要 + 完整 JSON 结果。
+ *
+ * 关键事实（v0.3 实测）：**DSH 把 output.render 的返回值直接当作工具消息内容**，
+ * 模型看到的就只是这几段文本。v0.1–v0.2 只返回一行摘要，于是 fields / options /
+ * gaps / askHint / submissionPlan 全都没进模型上下文——真实会话里模型只能靠猜字段名
+ * （传过 `values:{depth:"标准"}`、`values:{mode:"重"}` 这种）。所以这里两段都发：
+ * 第一段给人扫一眼，第二段是模型干活要用的结构化数据。
+ * 摘要可能在"回放"时拿到结构不完整的旧值，所以必须永不抛错。
  * output.schema 留空对象 = 接受任意 JSON 值（DSH 的 DSL 里叫 type:'json'，
  * 但注册表校验的是标准 JSON Schema，不能出现 'json' 这个类型名）。
  */
@@ -351,7 +357,10 @@ function tool(definition) {
     parameters: objectSchema(parameters, required),
     output: {
       schema: {},
-      render: (_args, value) => [{ type: 'text', text: safeSummary(summarize, value) }]
+      render: (_args, value) => [
+        { type: 'text', text: safeSummary(summarize, value) },
+        { type: 'text', text: safeJson(value) }
+      ]
     },
     execute
   };
@@ -364,6 +373,16 @@ function safeSummary(summarize, value) {
     return typeof text === 'string' && text ? text : '已完成。';
   } catch {
     return '已完成，详情见工具结果。';
+  }
+}
+
+/** 结构化结果的兜底：模型要靠这段文本干活，序列化失败就给一句人话 */
+function safeJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    return typeof text === 'string' && text ? text : '{}';
+  } catch {
+    return '{"ok":null,"note":"结果无法序列化，只保留上面那行摘要"}';
   }
 }
 
