@@ -2,11 +2,17 @@
 
 **把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。**
 
+![照片](packages/dsh-vibe-coding-prd/icon.svg)
 ![许可](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dsh](https://img.shields.io/badge/dsh-%3E%3D0.1.0-1f6feb.svg)
 
 ---
 
+## 声明
+
+本插件基于一个同名 Codex Skill 改造而来。该 Skill 的原始来源未能确认；本人仅完成了将其适配为 DSH 插件的工作，特此说明。
+
+---
 ## 它解决什么问题
 
 用 AI 写东西的人，真正的瓶颈很少是"AI 不会写代码"，而是**需求说不清**：

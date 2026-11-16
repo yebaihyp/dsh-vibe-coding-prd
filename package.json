@@ -1,0 +1,32 @@
+{
+  "name": "dsh-vibe-coding-prd",
+  "version": "0.3.1",
+  "description": "把一个说不清需求的人，通过一问一答，带到一份 AI 能直接照着开工的 PRD。",
+  "keywords": [
+    "vibe-coding",
+    "prd",
+    "dsh",
+    "dsh-plugn",
+    "deepseek",
+    "deepseek-harness",
+    "ai"
+  ],
+  "homepage": "https://github.com/yebaihyp/dsh-vibe-coding-prd#readme",
+  "bugs": {
+    "url": "https://github.com/yebaihyp/dsh-vibe-coding-prd/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yebaihyp/dsh-vibe-coding-prd.git"
+  },
+  "license": "MIT",
+  "author": "yebaihyp",
+  "type": "type: (commonjs)",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
